@@ -28,13 +28,13 @@ const BG_BLUR_PASSES = 3
 const COLOR_SAT = 0.2
 const PHOTO_MID = 0.38
 const PAPER_MIN_LUMA = 175
-const PAPER_LUMA = 220
+const PAPER_LUMA = 240
 const PAPER_GRAIN = 200
-const INK_GAMMA = 1.32
+const INK_GAMMA = 1.28
 const SAT_BOOST = 1.08
 const SAT_MIN = 0.2
-const SHARPEN_AMOUNT = 1.14
-const SHARPEN_NOISE = 7
+const SHARPEN_AMOUNT = 1.08
+const SHARPEN_NOISE = 10
 const YIELD_MS = 24
 
 function sourceSize(image: CanvasImageSource): { width: number; height: number } {
@@ -614,35 +614,12 @@ async function whiteBalanceRgb(
 
 function clampPaperWhite(data: Uint8ClampedArray, width: number, height: number) {
   const n = width * height
-  const gray = new Float32Array(n)
-  for (let p = 0, i = 0; p < n; p += 1, i += 4) {
-    gray[p] = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
-  }
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const p = y * width + x
-      const i = p * 4
-      const sat = pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
-      if (sat >= COLOR_SAT) continue
-      const luma = gray[p] ?? 0
-      let paper = luma >= PAPER_LUMA
-      if (!paper && luma >= 210) {
-        let bright = 0
-        let seen = 0
-        for (let dy = -1; dy <= 1; dy += 1) {
-          const yy = y + dy
-          if (yy < 0 || yy >= height) continue
-          for (let dx = -1; dx <= 1; dx += 1) {
-            if (dx === 0 && dy === 0) continue
-            const xx = x + dx
-            if (xx < 0 || xx >= width) continue
-            seen += 1
-            if ((gray[yy * width + xx] ?? 0) >= PAPER_GRAIN - 8) bright += 1
-          }
-        }
-        paper = seen > 0 && bright >= seen - 1
-      }
-      if (!paper) continue
+  for (let p = 0; p < n; p += 1) {
+    const i = p * 4
+    const red = data[i] ?? 0
+    const green = data[i + 1] ?? 0
+    const blue = data[i + 2] ?? 0
+    if (pixelLuma(red, green, blue) >= PAPER_LUMA && pixelSat(red, green, blue) < COLOR_SAT) {
       data[i] = 255
       data[i + 1] = 255
       data[i + 2] = 255
@@ -788,6 +765,83 @@ async function despeckle(
       }
     }
     if (count > 3 || maxX - minX > 1 || maxY - minY > 1) continue
+    for (let c = 0; c < count; c += 1) {
+      const i = (cells[c] ?? 0) * 4
+      data[i] = 255
+      data[i + 1] = 255
+      data[i + 2] = 255
+    }
+  }
+}
+
+/** Mid-gray blotches sitting on white paper — not letter strokes or punctuation. */
+async function despeckleGraySpots(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  clock: { last: number },
+) {
+  const n = width * height
+  const gray = new Uint8Array(n)
+  for (let p = 0, i = 0; p < n; p += 1, i += 4) {
+    gray[p] = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) | 0
+  }
+  const seen = new Uint8Array(n)
+  const stack = new Int32Array(n)
+  const cells = new Int32Array(48)
+  const yieldEvery = Math.max(width * 20, 1)
+  const isSpot = (tone: number) => tone >= 110 && tone < 240
+  for (let start = 0; start < n; start += 1) {
+    if (start % yieldEvery === 0) await yieldBusy(clock)
+    if (seen[start] || !isSpot(gray[start] ?? 255)) continue
+    const si = start * 4
+    if (pixelSat(data[si] ?? 0, data[si + 1] ?? 0, data[si + 2] ?? 0) > COLOR_SAT) continue
+    let top = 0
+    stack[0] = start
+    top = 1
+    seen[start] = 1
+    let count = 0
+    let minX = width
+    let minY = height
+    let maxX = 0
+    let maxY = 0
+    let paperEdge = 0
+    let edge = 0
+    while (top > 0) {
+      top -= 1
+      const index = stack[top] ?? 0
+      if (count < 48) cells[count] = index
+      count += 1
+      const x = index % width
+      const y = (index - x) / width
+      if (x < minX) minX = x
+      if (y < minY) minY = y
+      if (x > maxX) maxX = x
+      if (y > maxY) maxY = y
+      const look = (ok: boolean, next: number) => {
+        if (!ok) {
+          edge += 1
+          return
+        }
+        const tone = gray[next] ?? 255
+        if (isSpot(tone)) {
+          if (!seen[next]) {
+            seen[next] = 1
+            stack[top] = next
+            top += 1
+          }
+          return
+        }
+        edge += 1
+        if (tone >= 240) paperEdge += 1
+      }
+      look(x > 0, index - 1)
+      look(x + 1 < width, index + 1)
+      look(y > 0, index - width)
+      look(y + 1 < height, index + width)
+    }
+    if (count > 40 || maxX - minX > 8 || maxY - minY > 8) continue
+    if (edge < 4 || paperEdge < edge * 0.65) continue
     for (let c = 0; c < count; c += 1) {
       const i = (cells[c] ?? 0) * 4
       data[i] = 255
@@ -1112,6 +1166,7 @@ async function applyMagicColor(image: ImageData) {
   clampPaperWhite(data, width, height)
   await applyScanTone(data, width, height, clock)
   await despeckle(data, width, height, clock)
+  await despeckleGraySpots(data, width, height, clock)
   sharpenLuma(image)
   clampPaperWhite(data, width, height)
 }
@@ -1123,6 +1178,7 @@ async function applyFastBlackWhite(image: ImageData) {
   clampPaperWhite(data, width, height)
   await applyScanTone(data, width, height, clock)
   await despeckle(data, width, height, clock)
+  await despeckleGraySpots(data, width, height, clock)
   sharpenLuma(image)
   clampPaperWhite(data, width, height)
   desaturatePixels(data)
