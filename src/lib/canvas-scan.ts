@@ -28,7 +28,8 @@ const BG_BLUR_PASSES = 3
 const COLOR_SAT = 0.2
 const PHOTO_MID = 0.38
 const PAPER_MIN_LUMA = 175
-const PAPER_LUMA = 232
+const PAPER_LUMA = 220
+const PAPER_GRAIN = 200
 const INK_GAMMA = 1.32
 const SAT_BOOST = 1.08
 const SAT_MIN = 0.2
@@ -595,6 +596,10 @@ async function whiteBalanceRgb(
         data[i] = 255
         data[i + 1] = 255
         data[i + 2] = 255
+      } else if (luma >= PAPER_GRAIN) {
+        data[i] = red
+        data[i + 1] = green
+        data[i + 2] = blue
       } else {
         const out = Math.pow(luma / 255, INK_GAMMA) * 255
         const lift = luma > 1 ? out / luma : 1
@@ -607,12 +612,37 @@ async function whiteBalanceRgb(
   }
 }
 
-function clampPaperWhite(data: Uint8ClampedArray) {
-  for (let i = 0; i < data.length; i += 4) {
-    const red = data[i] ?? 0
-    const green = data[i + 1] ?? 0
-    const blue = data[i + 2] ?? 0
-    if (pixelLuma(red, green, blue) >= PAPER_LUMA && pixelSat(red, green, blue) < COLOR_SAT) {
+function clampPaperWhite(data: Uint8ClampedArray, width: number, height: number) {
+  const n = width * height
+  const gray = new Float32Array(n)
+  for (let p = 0, i = 0; p < n; p += 1, i += 4) {
+    gray[p] = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
+  }
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const p = y * width + x
+      const i = p * 4
+      const sat = pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
+      if (sat >= COLOR_SAT) continue
+      const luma = gray[p] ?? 0
+      let paper = luma >= PAPER_LUMA
+      if (!paper && luma >= 210) {
+        let bright = 0
+        let seen = 0
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const yy = y + dy
+          if (yy < 0 || yy >= height) continue
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0) continue
+            const xx = x + dx
+            if (xx < 0 || xx >= width) continue
+            seen += 1
+            if ((gray[yy * width + xx] ?? 0) >= PAPER_GRAIN - 8) bright += 1
+          }
+        }
+        paper = seen > 0 && bright >= seen - 1
+      }
+      if (!paper) continue
       data[i] = 255
       data[i + 1] = 255
       data[i + 2] = 255
@@ -1079,22 +1109,22 @@ async function applyMagicColor(image: ImageData) {
   const { data, width, height } = image
   const clock = { last: performance.now() }
   await whiteBalanceRgb(data, width, height, clock)
-  clampPaperWhite(data)
+  clampPaperWhite(data, width, height)
   await applyScanTone(data, width, height, clock)
   await despeckle(data, width, height, clock)
   sharpenLuma(image)
-  clampPaperWhite(data)
+  clampPaperWhite(data, width, height)
 }
 
 async function applyFastBlackWhite(image: ImageData) {
   const { data, width, height } = image
   const clock = { last: performance.now() }
   await whiteBalanceRgb(data, width, height, clock)
-  clampPaperWhite(data)
+  clampPaperWhite(data, width, height)
   await applyScanTone(data, width, height, clock)
   await despeckle(data, width, height, clock)
   sharpenLuma(image)
-  clampPaperWhite(data)
+  clampPaperWhite(data, width, height)
   desaturatePixels(data)
   await yieldBusy(clock)
 }
