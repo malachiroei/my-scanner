@@ -28,12 +28,12 @@ const BG_BLUR_PASSES = 3
 const COLOR_SAT = 0.2
 const PHOTO_MID = 0.38
 const PAPER_MIN_LUMA = 175
-const PAPER_LUMA = 250
-const INK_GAMMA = 1.24
+const PAPER_LUMA = 232
+const INK_GAMMA = 1.32
 const SAT_BOOST = 1.08
 const SAT_MIN = 0.2
-const SHARPEN_AMOUNT = 1.1
-const SHARPEN_NOISE = 8
+const SHARPEN_AMOUNT = 1.14
+const SHARPEN_NOISE = 7
 const YIELD_MS = 24
 
 function sourceSize(image: CanvasImageSource): { width: number; height: number } {
