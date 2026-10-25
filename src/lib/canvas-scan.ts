@@ -29,10 +29,11 @@ const COLOR_SAT = 0.2
 const PHOTO_MID = 0.38
 const PAPER_MIN_LUMA = 175
 const PAPER_LUMA = 250
+const INK_GAMMA = 1.24
 const SAT_BOOST = 1.08
 const SAT_MIN = 0.2
-const SHARPEN_AMOUNT = 1.06
-const SHARPEN_NOISE = 12
+const SHARPEN_AMOUNT = 1.1
+const SHARPEN_NOISE = 8
 const YIELD_MS = 24
 
 function sourceSize(image: CanvasImageSource): { width: number; height: number } {
@@ -586,14 +587,20 @@ async function whiteBalanceRgb(
       const sat = pixelSat(srcR, srcG, srcB)
       const photo = sampleField(protect, sw, sh, x, y, width, height) > 0.35
       const luma = pixelLuma(red, green, blue)
-      if (!photo && sat < COLOR_SAT && luma >= PAPER_LUMA) {
+      if (photo || sat >= COLOR_SAT) {
+        data[i] = red
+        data[i + 1] = green
+        data[i + 2] = blue
+      } else if (luma >= PAPER_LUMA) {
         data[i] = 255
         data[i + 1] = 255
         data[i + 2] = 255
       } else {
-        data[i] = red
-        data[i + 1] = green
-        data[i + 2] = blue
+        const out = Math.pow(luma / 255, INK_GAMMA) * 255
+        const lift = luma > 1 ? out / luma : 1
+        data[i] = clamp255(red * lift)
+        data[i + 1] = clamp255(green * lift)
+        data[i + 2] = clamp255(blue * lift)
       }
       data[i + 3] = 255
     }
