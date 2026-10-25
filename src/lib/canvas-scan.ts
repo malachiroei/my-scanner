@@ -21,21 +21,18 @@ function isLandscape(corners: Corners): boolean {
   return width > height * 1.15
 }
 
-/** Local adaptive contrast: ink if darker than nearby paper by INK_DIFF. */
-const BG_DOWN = 16
-const BG_BLUR_RADIUS = 15
+/** Paper RGB divide only. No ink threshold — that erased Hebrew and photos. */
+const BG_DOWN = 8
+const BG_BLUR_RADIUS = 18
 const BG_BLUR_PASSES = 3
 const COLOR_SAT = 0.2
 const PHOTO_MID = 0.38
 const PAPER_MIN_LUMA = 175
-const INK_DIFF = 12
-const INK_SPAN = 45
-const INK_FLOOR = 35
 const PAPER_LUMA = 250
-const SAT_BOOST = 1.1
+const SAT_BOOST = 1.08
 const SAT_MIN = 0.2
-const SHARPEN_AMOUNT = 1.08
-const SHARPEN_NOISE = 10
+const SHARPEN_AMOUNT = 1.06
+const SHARPEN_NOISE = 12
 const YIELD_MS = 24
 
 function sourceSize(image: CanvasImageSource): { width: number; height: number } {
@@ -563,8 +560,8 @@ async function estimatePaperRgb(
 }
 
 /**
- * Local adaptive threshold: compare each pixel to nearby paper, not a global luma cut.
- * bg − luma > 12 → ink (thin Hebrew stays); else paper → #FFFFFF.
+ * CamScanner-style flatten: divide by local paper RGB, then stop.
+ * Near-white paper is mopped to #FFFFFF. Everything else keeps continuous tone.
  */
 async function whiteBalanceRgb(
   data: Uint8ClampedArray,
@@ -577,34 +574,26 @@ async function whiteBalanceRgb(
     if (y % 48 === 0) await yieldBusy(clock)
     for (let x = 0; x < width; x += 1) {
       const i = (y * width + x) * 4
-      const red = data[i] ?? 0
-      const green = data[i + 1] ?? 0
-      const blue = data[i + 2] ?? 0
+      const srcR = data[i] ?? 0
+      const srcG = data[i + 1] ?? 0
+      const srcB = data[i + 2] ?? 0
       const bgR = Math.max(sampleBlurred(fieldR, sw, sh, x, y, width, height), 40)
       const bgG = Math.max(sampleBlurred(fieldG, sw, sh, x, y, width, height), 40)
       const bgB = Math.max(sampleBlurred(fieldB, sw, sh, x, y, width, height), 40)
-      const bg = Math.max(pixelLuma(bgR, bgG, bgB), 1)
-      const luma = pixelLuma(red, green, blue)
-      const sat = pixelSat(red, green, blue)
+      const red = clamp255((srcR * 255) / bgR)
+      const green = clamp255((srcG * 255) / bgG)
+      const blue = clamp255((srcB * 255) / bgB)
+      const sat = pixelSat(srcR, srcG, srcB)
       const photo = sampleField(protect, sw, sh, x, y, width, height) > 0.35
-      if (sat > COLOR_SAT || photo) {
-        const gain = 255 / Math.max(bg, 110)
-        data[i] = clamp255(Math.round(red * gain))
-        data[i + 1] = clamp255(Math.round(green * gain))
-        data[i + 2] = clamp255(Math.round(blue * gain))
+      const luma = pixelLuma(red, green, blue)
+      if (!photo && sat < COLOR_SAT && luma >= PAPER_LUMA) {
+        data[i] = 255
+        data[i + 1] = 255
+        data[i + 2] = 255
       } else {
-        const diff = bg - luma
-        if (diff > INK_DIFF) {
-          const strokeStrength = Math.min(1, (diff - INK_DIFF) / INK_SPAN)
-          const inkVal = Math.round(INK_FLOOR * (1 - strokeStrength))
-          data[i] = inkVal
-          data[i + 1] = inkVal
-          data[i + 2] = inkVal
-        } else {
-          data[i] = 255
-          data[i + 1] = 255
-          data[i + 2] = 255
-        }
+        data[i] = red
+        data[i + 1] = green
+        data[i + 2] = blue
       }
       data[i + 3] = 255
     }
@@ -963,7 +952,6 @@ function trimToPaper(source: HTMLCanvasElement): HTMLCanvasElement {
   const maxY = (sh * 0.12) | 0
   while (left < maxX && left < right && lineWeak('col', left)) left += 1
   while (right > sw - 1 - maxX && right > left && lineWeak('col', right)) right -= 1
-  while (top < maxY && top < bottom && lineWeak('row', top)) top += 1
   while (bottom > sh - 1 - maxY && bottom > top && lineWeak('row', bottom)) bottom -= 1
   sample.width = 0
   sample.height = 0
@@ -1053,7 +1041,7 @@ function trimDarkMargins(source: HTMLCanvasElement): HTMLCanvasElement {
   const image = context.getImageData(0, 0, width, height)
   const data = image.data
   const dropYellow = interiorIsWhite(data, width, height)
-  const maxY = Math.floor(height * 0.1)
+  const maxY = Math.floor(height * 0.03)
   const maxX = Math.floor(width * 0.2)
   let top = 0
   let bottom = height
@@ -1147,12 +1135,12 @@ async function processPixels(
 
 /** Magic Color: white paper, crisp text, continuous-tone photos. Never 1-bit, never a region mask. */
 export async function applyCanvasMagic(source: HTMLCanvasElement): Promise<HTMLCanvasElement> {
-  return trimDarkMargins(await processPixels(source, applyMagicColor))
+  return processPixels(source, applyMagicColor)
 }
 
 /** High-contrast grayscale of the same continuous-tone page (no binary threshold). */
 export async function applyCanvasBlackWhite(source: HTMLCanvasElement): Promise<HTMLCanvasElement> {
-  return trimDarkMargins(await processPixels(source, applyFastBlackWhite))
+  return processPixels(source, applyFastBlackWhite)
 }
 
 export async function renderCanvasDocument(
