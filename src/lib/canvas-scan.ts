@@ -25,11 +25,10 @@ function isLandscape(corners: Corners): boolean {
 const BG_DOWN = 8
 const BG_BLUR_RADIUS = 20
 const BG_BLUR_PASSES = 3
-const PAPER_RATIO = 0.8
+const PAPER_RATIO = 0.82
 const COLOR_SAT = 0.25
 const PHOTO_MID = 0.38
 const PAPER_MIN_LUMA = 175
-const INK_GAMMA = 1.6
 const PAPER_LUMA = 248
 const SAT_BOOST = 1.1
 const SAT_MIN = 0.25
@@ -571,7 +570,7 @@ async function whiteBalanceRgb(
   height: number,
   clock: { last: number },
 ) {
-  const { fieldR, fieldG, fieldB, protect, sw, sh } = await estimatePaperRgb(data, width, height, clock)
+  const { fieldR, fieldG, fieldB, sw, sh } = await estimatePaperRgb(data, width, height, clock)
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
     for (let x = 0; x < width; x += 1) {
@@ -588,17 +587,16 @@ async function whiteBalanceRgb(
       const luma = pixelLuma(red, green, blue)
       const sat = pixelSat(red, green, blue)
       const ratio = luma / 255
-      const photo = sampleField(protect, sw, sh, x, y, width, height) > 0.35
       if (ratio > PAPER_RATIO && sat < COLOR_SAT) {
         data[i] = 255
         data[i + 1] = 255
         data[i + 2] = 255
-      } else if (sat < COLOR_SAT && !photo) {
+      } else if (sat < COLOR_SAT) {
         const norm = Math.min(1, Math.max(0, ratio / PAPER_RATIO))
-        const textVal = Math.floor(norm ** INK_GAMMA * 255)
-        data[i] = textVal
-        data[i + 1] = textVal
-        data[i + 2] = textVal
+        const finalVal = Math.min(0x22, Math.floor(norm * 60))
+        data[i] = finalVal
+        data[i + 1] = finalVal
+        data[i + 2] = finalVal
       } else {
         data[i] = red
         data[i + 1] = green
