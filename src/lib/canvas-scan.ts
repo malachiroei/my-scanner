@@ -21,17 +21,19 @@ function isLandscape(corners: Corners): boolean {
   return width > height * 1.15
 }
 
-/** Per-channel white point → paper #FFFFFF, ink crush, color/photos kept. */
+/** Adaptive flatten + smooth tone stretch. No binary ink cutoff. */
 const BG_DOWN = 8
-const BG_BLUR_RADIUS = 20
+const BG_BLUR_RADIUS = 15
 const BG_BLUR_PASSES = 3
-const PAPER_RATIO = 0.82
-const COLOR_SAT = 0.25
+const COLOR_SAT = 0.22
 const PHOTO_MID = 0.38
 const PAPER_MIN_LUMA = 175
-const PAPER_LUMA = 248
+const PAPER_FLAT = 200
+const INK_FLAT = 110
+const INK_OUT = 40
+const PAPER_LUMA = 250
 const SAT_BOOST = 1.1
-const SAT_MIN = 0.25
+const SAT_MIN = 0.22
 const SHARPEN_AMOUNT = 1.08
 const SHARPEN_NOISE = 10
 const YIELD_MS = 24
@@ -560,9 +562,16 @@ async function estimatePaperRgb(
   return { fieldR, fieldG, fieldB, protect, sw, sh }
 }
 
+function mapFlatLuma(flat: number) {
+  if (flat >= PAPER_FLAT) return 255
+  if (flat <= INK_FLAT) return Math.floor((flat / INK_FLAT) * INK_OUT)
+  const t = (flat - INK_FLAT) / (PAPER_FLAT - INK_FLAT)
+  return Math.floor(INK_OUT + t * (255 - INK_OUT))
+}
+
 /**
- * White-point flatten, then hard paper white / ink crush / color keep.
- * Neutral pixels within 20% of local paper → #FFFFFF (kills yellow/green cast).
+ * Per-channel white point, then a smooth tone stretch.
+ * Paper ≥ 200 → #FFFFFF; ink ≤ 110 → charcoal; 110–200 stays a ramp so AA strokes survive.
  */
 async function whiteBalanceRgb(
   data: Uint8ClampedArray,
@@ -570,7 +579,7 @@ async function whiteBalanceRgb(
   height: number,
   clock: { last: number },
 ) {
-  const { fieldR, fieldG, fieldB, sw, sh } = await estimatePaperRgb(data, width, height, clock)
+  const { fieldR, fieldG, fieldB, protect, sw, sh } = await estimatePaperRgb(data, width, height, clock)
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
     for (let x = 0; x < width; x += 1) {
@@ -581,26 +590,23 @@ async function whiteBalanceRgb(
       const bgR = Math.max(sampleBlurred(fieldR, sw, sh, x, y, width, height), 40)
       const bgG = Math.max(sampleBlurred(fieldG, sw, sh, x, y, width, height), 40)
       const bgB = Math.max(sampleBlurred(fieldB, sw, sh, x, y, width, height), 40)
+      const bg = Math.max(pixelLuma(bgR, bgG, bgB), 1)
       const red = clamp255((srcR * 255) / bgR)
       const green = clamp255((srcG * 255) / bgG)
       const blue = clamp255((srcB * 255) / bgB)
-      const luma = pixelLuma(red, green, blue)
-      const sat = pixelSat(red, green, blue)
-      const ratio = luma / 255
-      if (ratio > PAPER_RATIO && sat < COLOR_SAT) {
-        data[i] = 255
-        data[i + 1] = 255
-        data[i + 2] = 255
-      } else if (sat < COLOR_SAT) {
-        const norm = Math.min(1, Math.max(0, ratio / PAPER_RATIO))
-        const finalVal = Math.min(0x22, Math.floor(norm * 60))
-        data[i] = finalVal
-        data[i + 1] = finalVal
-        data[i + 2] = finalVal
+      const sat = pixelSat(srcR, srcG, srcB)
+      const photo = sampleField(protect, sw, sh, x, y, width, height) > 0.35
+      if (sat > COLOR_SAT || photo) {
+        const gain = 255 / Math.max(bg, 130)
+        data[i] = clamp255(Math.floor(srcR * gain))
+        data[i + 1] = clamp255(Math.floor(srcG * gain))
+        data[i + 2] = clamp255(Math.floor(srcB * gain))
       } else {
-        data[i] = red
-        data[i + 1] = green
-        data[i + 2] = blue
+        const flat = pixelLuma(red, green, blue)
+        const outLuma = mapFlatLuma(flat)
+        data[i] = outLuma
+        data[i + 1] = outLuma
+        data[i + 2] = outLuma
       }
       data[i + 3] = 255
     }
@@ -822,6 +828,8 @@ function sampleLine(
   let paper = 0
   let dark = 0
   let yellow = 0
+  let midtone = 0
+  let color = 0
   let sum = 0
   let midPaper = 0
   const mid0 = (span * 0.22) | 0
@@ -832,6 +840,8 @@ function sampleLine(
     const sat = chroma[p] ?? 0
     sum += tone
     if (tone < 70) dark += 1
+    if (tone > 70 && tone < 200) midtone += 1
+    if (sat > 28) color += 1
     if (tone > 160 && sat > 28) yellow += 1
     if (mask[p]) {
       paper += 1
@@ -843,6 +853,8 @@ function sampleLine(
     paper: paper / span,
     dark: dark / span,
     yellow: yellow / span,
+    midtone: midtone / span,
+    color: color / span,
     mean: sum / span,
     midPaper: midPaper / midN,
   }
@@ -938,6 +950,7 @@ function trimToPaper(source: HTMLCanvasElement): HTMLCanvasElement {
   const lineWeak = (axis: 'row' | 'col', index: number) => {
     const stats = sampleLine(mask, gray, chroma, sw, sh, axis, index)
     if (stats.midPaper > 0.48) return false
+    if (stats.midtone > 0.2 || stats.color > 0.08) return false
     return stats.paper < 0.4 && (stats.dark > 0.12 || stats.yellow > 0.25 || stats.paper < 0.22)
   }
   let left = best.minX
@@ -983,6 +996,8 @@ function edgeIsBackdrop(
   let dark = 0
   let paper = 0
   let yellow = 0
+  let midtone = 0
+  let color = 0
   let midPaper = 0
   let sum = 0
   for (let k = 0; k < span; k += 1) {
@@ -994,6 +1009,8 @@ function edgeIsBackdrop(
     const sat = Math.max(r, g, b) - Math.min(r, g, b)
     sum += luma
     if (luma < 70) dark += 1
+    if (luma > 70 && luma < 200) midtone += 1
+    if (sat > 28) color += 1
     if (luma > 160 && sat > 28) yellow += 1
     if (luma > 200 && sat < 22) {
       paper += 1
@@ -1003,6 +1020,7 @@ function edgeIsBackdrop(
     }
   }
   if (midPaper > (mid1 - mid0) * 0.48) return false
+  if (midtone > span * 0.2 || color > span * 0.08) return false
   if (paper < span * 0.12 && (sum / span < 80 || dark > span * 0.4)) return true
   if (!dropYellow) return false
   return paper < span * 0.4 && (dark > span * 0.12 || yellow > span * 0.25 || paper < span * 0.22)
