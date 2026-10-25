@@ -21,18 +21,18 @@ function isLandscape(corners: Corners): boolean {
   return width > height * 1.15
 }
 
-/** Illumination ÷ with photo protection: paper goes white; photos keep continuous tone. */
+/** Per-channel white point → paper #FFFFFF, ink crush, color/photos kept. */
 const BG_DOWN = 8
 const BG_BLUR_RADIUS = 20
 const BG_BLUR_PASSES = 3
-const PAPER_RATIO = 0.88
-const COLOR_SAT = 0.15
-const PHOTO_MID = 0.28
-const PHOTO_GAIN_MAX = 1.22
-const CURVE_GAMMA = 1.35
-const PAPER_LUMA = 250
+const PAPER_RATIO = 0.8
+const COLOR_SAT = 0.25
+const PHOTO_MID = 0.38
+const PAPER_MIN_LUMA = 175
+const INK_GAMMA = 1.6
+const PAPER_LUMA = 248
 const SAT_BOOST = 1.1
-const SAT_MIN = 0.08
+const SAT_MIN = 0.25
 const SHARPEN_AMOUNT = 1.08
 const SHARPEN_NOISE = 10
 const YIELD_MS = 24
@@ -443,7 +443,7 @@ function boxBlurGray(gray: Float32Array, width: number, height: number, radius: 
   return gray
 }
 
-function sampleBlurred(gray: Float32Array, sw: number, sh: number, x: number, y: number, width: number, height: number) {
+function sampleField(gray: Float32Array, sw: number, sh: number, x: number, y: number, width: number, height: number) {
   const fx = ((x + 0.5) / width) * (sw - 1)
   const fy = ((y + 0.5) / height) * (sh - 1)
   const x0 = fx | 0
@@ -452,26 +452,22 @@ function sampleBlurred(gray: Float32Array, sw: number, sh: number, x: number, y:
   const y1 = Math.min(sh - 1, y0 + 1)
   const tx = fx - x0
   const ty = fy - y0
-  const a = gray[y0 * sw + x0] ?? 1
-  const b = gray[y0 * sw + x1] ?? 1
-  const c = gray[y1 * sw + x0] ?? 1
-  const d = gray[y1 * sw + x1] ?? 1
-  return Math.max(1, (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty)
+  const a = gray[y0 * sw + x0] ?? 0
+  const b = gray[y0 * sw + x1] ?? 0
+  const c = gray[y1 * sw + x0] ?? 0
+  const d = gray[y1 * sw + x1] ?? 0
+  return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty
 }
 
-function scaleRgb(red: number, green: number, blue: number, scale: number): [number, number, number] {
-  return [
-    clamp255(Math.round(red * scale)),
-    clamp255(Math.round(green * scale)),
-    clamp255(Math.round(blue * scale)),
-  ]
+function sampleBlurred(gray: Float32Array, sw: number, sh: number, x: number, y: number, width: number, height: number) {
+  return Math.max(1, sampleField(gray, sw, sh, x, y, width, height))
 }
 
 /**
- * Paper field from low-saturation pixels only. Photo cells (lots of midtones) are
- * filled from surrounding paper so car highlights cannot become the local background.
+ * Local paper RGB (not luma). Yellow/green ambient light is captured per channel
+ * so dividing by it removes the cast instead of scaling it up.
  */
-async function estimatePaperField(
+async function estimatePaperRgb(
   data: Uint8ClampedArray,
   width: number,
   height: number,
@@ -479,9 +475,13 @@ async function estimatePaperField(
 ) {
   const sw = Math.max(12, Math.round(width / BG_DOWN))
   const sh = Math.max(12, Math.round(height / BG_DOWN))
-  const field = new Float32Array(sw * sh)
+  const fieldR = new Float32Array(sw * sh)
+  const fieldG = new Float32Array(sw * sh)
+  const fieldB = new Float32Array(sw * sh)
   const protect = new Float32Array(sw * sh)
-  let paperSum = 0
+  let sumR = 0
+  let sumG = 0
+  let sumB = 0
   let paperN = 0
   for (let y = 0; y < sh; y += 1) {
     const y0 = Math.floor((y * height) / sh)
@@ -489,7 +489,10 @@ async function estimatePaperField(
     for (let x = 0; x < sw; x += 1) {
       const x0 = Math.floor((x * width) / sw)
       const x1 = Math.max(x0 + 1, Math.floor(((x + 1) * width) / sw))
-      let peak = 0
+      let peakLuma = 0
+      let peakR = 0
+      let peakG = 0
+      let peakB = 0
       let paperCount = 0
       let midCount = 0
       let count = 0
@@ -503,9 +506,12 @@ async function estimatePaperField(
           const luma = pixelLuma(red, green, blue)
           const sat = pixelSat(red, green, blue)
           count += 1
-          if (sat < COLOR_SAT) {
+          if (sat < COLOR_SAT && luma >= PAPER_MIN_LUMA) {
             paperCount += 1
-            if (luma > peak) peak = luma
+            if (red > peakR) peakR = red
+            if (green > peakG) peakG = green
+            if (blue > peakB) peakB = blue
+            if (luma > peakLuma) peakLuma = luma
           }
         }
       }
@@ -514,38 +520,50 @@ async function estimatePaperField(
         for (let xx = x0; xx < x1; xx += 1) {
           const i = (row + xx) * 4
           const luma = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
-          if (luma > 36 && luma < peak * 0.85) midCount += 1
+          if (luma > 36 && luma < peakLuma * 0.85) midCount += 1
         }
       }
       const id = y * sw + x
       const midFrac = count > 0 ? midCount / count : 0
-      protect[id] = midFrac > PHOTO_MID ? 1 : 0
-      if (paperCount > 0 && peak > 60) {
-        field[id] = peak
-        paperSum += peak
+      const paperFrac = count > 0 ? paperCount / count : 0
+      const isPhoto = midFrac > PHOTO_MID && paperFrac < 0.4
+      protect[id] = isPhoto ? 1 : 0
+      if (!isPhoto && paperCount > 0 && peakLuma >= PAPER_MIN_LUMA) {
+        fieldR[id] = peakR
+        fieldG[id] = peakG
+        fieldB[id] = peakB
+        sumR += peakR
+        sumG += peakG
+        sumB += peakB
         paperN += 1
-      } else {
-        field[id] = 0
       }
     }
     if (y % 4 === 0) await yieldBusy(clock)
   }
-  const fallback = paperN > 0 ? paperSum / paperN : 220
-  for (let i = 0; i < field.length; i += 1) {
-    if ((field[i] ?? 0) < 1) field[i] = fallback
+  const fallbackR = paperN > 0 ? sumR / paperN : 220
+  const fallbackG = paperN > 0 ? sumG / paperN : 220
+  const fallbackB = paperN > 0 ? sumB / paperN : 220
+  for (let i = 0; i < fieldR.length; i += 1) {
+    if ((fieldR[i] ?? 0) < 1) {
+      fieldR[i] = fallbackR
+      fieldG[i] = fallbackG
+      fieldB[i] = fallbackB
+    }
   }
   const radius = Math.max(2, Math.min(BG_BLUR_RADIUS, Math.floor(Math.min(sw, sh) / 2) - 1))
   for (let pass = 0; pass < BG_BLUR_PASSES; pass += 1) {
-    boxBlurGray(field, sw, sh, radius)
+    boxBlurGray(fieldR, sw, sh, radius)
+    boxBlurGray(fieldG, sw, sh, radius)
+    boxBlurGray(fieldB, sw, sh, radius)
     await yieldBusy(clock)
   }
-  boxBlurGray(protect, sw, sh, 2)
-  return { field, protect, sw, sh }
+  boxBlurGray(protect, sw, sh, 1)
+  return { fieldR, fieldG, fieldB, protect, sw, sh }
 }
 
 /**
- * Local illumination flatten. Paper (ratio ≥ 0.88, low sat) → #FFFFFF.
- * Color and photo midtones keep continuous RGB; ink gets a smooth S-curve — never a binary cut.
+ * White-point flatten, then hard paper white / ink crush / color keep.
+ * Neutral pixels within 20% of local paper → #FFFFFF (kills yellow/green cast).
  */
 async function whiteBalanceRgb(
   data: Uint8ClampedArray,
@@ -553,36 +571,38 @@ async function whiteBalanceRgb(
   height: number,
   clock: { last: number },
 ) {
-  const { field, protect, sw, sh } = await estimatePaperField(data, width, height, clock)
+  const { fieldR, fieldG, fieldB, protect, sw, sh } = await estimatePaperRgb(data, width, height, clock)
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
     for (let x = 0; x < width; x += 1) {
       const i = (y * width + x) * 4
-      const red = data[i] ?? 0
-      const green = data[i + 1] ?? 0
-      const blue = data[i + 2] ?? 0
+      const srcR = data[i] ?? 0
+      const srcG = data[i + 1] ?? 0
+      const srcB = data[i + 2] ?? 0
+      const bgR = Math.max(sampleBlurred(fieldR, sw, sh, x, y, width, height), 40)
+      const bgG = Math.max(sampleBlurred(fieldG, sw, sh, x, y, width, height), 40)
+      const bgB = Math.max(sampleBlurred(fieldB, sw, sh, x, y, width, height), 40)
+      const red = clamp255((srcR * 255) / bgR)
+      const green = clamp255((srcG * 255) / bgG)
+      const blue = clamp255((srcB * 255) / bgB)
       const luma = pixelLuma(red, green, blue)
       const sat = pixelSat(red, green, blue)
-      const bg = sampleBlurred(field, sw, sh, x, y, width, height)
-      const ratio = luma / Math.max(bg, 30)
-      const photo = sampleBlurred(protect, sw, sh, x, y, width, height) > 0.35
-      if (sat > COLOR_SAT || (photo && ratio < PAPER_RATIO)) {
-        const gain = Math.min(255 / Math.max(bg, 30), PHOTO_GAIN_MAX)
-        const out = scaleRgb(red, green, blue, gain)
-        data[i] = out[0]
-        data[i + 1] = out[1]
-        data[i + 2] = out[2]
-      } else if (ratio >= PAPER_RATIO) {
+      const ratio = luma / 255
+      const photo = sampleField(protect, sw, sh, x, y, width, height) > 0.35
+      if (ratio > PAPER_RATIO && sat < COLOR_SAT) {
         data[i] = 255
         data[i + 1] = 255
         data[i + 2] = 255
+      } else if (sat < COLOR_SAT && !photo) {
+        const norm = Math.min(1, Math.max(0, ratio / PAPER_RATIO))
+        const textVal = Math.floor(norm ** INK_GAMMA * 255)
+        data[i] = textVal
+        data[i + 1] = textVal
+        data[i + 2] = textVal
       } else {
-        const normalized = Math.min(1, ratio / PAPER_RATIO)
-        const factor = normalized ** CURVE_GAMMA
-        const out = scaleRgb(red, green, blue, factor * 0.95 + 0.05)
-        data[i] = out[0]
-        data[i + 1] = out[1]
-        data[i + 2] = out[2]
+        data[i] = red
+        data[i + 1] = green
+        data[i + 2] = blue
       }
       data[i + 3] = 255
     }
