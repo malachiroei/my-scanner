@@ -21,14 +21,16 @@ function isLandscape(corners: Corners): boolean {
   return width > height * 1.15
 }
 
-/** Uniform mathematical scan: illumination ÷ → saturation → despeckle → unsharp. No region masks. */
+/** Illumination ÷ with photo protection: paper goes white; photos keep continuous tone. */
 const BG_DOWN = 8
-const BG_BLUR_RADIUS = 18
+const BG_BLUR_RADIUS = 20
 const BG_BLUR_PASSES = 3
-const PAPER_RATIO = 0.82
-const INK_RATIO = 0.15
-const PAPER_SAT = 0.2
-const PAPER_LUMA = 232
+const PAPER_RATIO = 0.88
+const COLOR_SAT = 0.15
+const PHOTO_MID = 0.28
+const PHOTO_GAIN_MAX = 1.22
+const CURVE_GAMMA = 1.35
+const PAPER_LUMA = 250
 const SAT_BOOST = 1.1
 const SAT_MIN = 0.08
 const SHARPEN_AMOUNT = 1.08
@@ -441,28 +443,6 @@ function boxBlurGray(gray: Float32Array, width: number, height: number, radius: 
   return gray
 }
 
-function dilateGray3x3(gray: Float32Array, width: number, height: number) {
-  const next = new Float32Array(width * height)
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      let peak = 0
-      for (let dy = -1; dy <= 1; dy += 1) {
-        const yy = y + dy
-        if (yy < 0 || yy >= height) continue
-        const row = yy * width
-        for (let dx = -1; dx <= 1; dx += 1) {
-          const xx = x + dx
-          if (xx < 0 || xx >= width) continue
-          const value = gray[row + xx] ?? 0
-          if (value > peak) peak = value
-        }
-      }
-      next[y * width + x] = peak
-    }
-  }
-  return next
-}
-
 function sampleBlurred(gray: Float32Array, sw: number, sh: number, x: number, y: number, width: number, height: number) {
   const fx = ((x + 0.5) / width) * (sw - 1)
   const fy = ((y + 0.5) / height) * (sh - 1)
@@ -479,11 +459,19 @@ function sampleBlurred(gray: Float32Array, sw: number, sh: number, x: number, y:
   return Math.max(1, (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty)
 }
 
+function scaleRgb(red: number, green: number, blue: number, scale: number): [number, number, number] {
+  return [
+    clamp255(Math.round(red * scale)),
+    clamp255(Math.round(green * scale)),
+    clamp255(Math.round(blue * scale)),
+  ]
+}
+
 /**
- * CamScanner-style illumination: heavily blurred paper field, then divide.
- * Soft shadows follow the field (ratio ≈ 1 → white); ink and photos stay below 0.82.
+ * Paper field from low-saturation pixels only. Photo cells (lots of midtones) are
+ * filled from surrounding paper so car highlights cannot become the local background.
  */
-async function whiteBalanceRgb(
+async function estimatePaperField(
   data: Uint8ClampedArray,
   width: number,
   height: number,
@@ -491,7 +479,10 @@ async function whiteBalanceRgb(
 ) {
   const sw = Math.max(12, Math.round(width / BG_DOWN))
   const sh = Math.max(12, Math.round(height / BG_DOWN))
-  let field = new Float32Array(sw * sh)
+  const field = new Float32Array(sw * sh)
+  const protect = new Float32Array(sw * sh)
+  let paperSum = 0
+  let paperN = 0
   for (let y = 0; y < sh; y += 1) {
     const y0 = Math.floor((y * height) / sh)
     const y1 = Math.max(y0 + 1, Math.floor(((y + 1) * height) / sh))
@@ -499,25 +490,70 @@ async function whiteBalanceRgb(
       const x0 = Math.floor((x * width) / sw)
       const x1 = Math.max(x0 + 1, Math.floor(((x + 1) * width) / sw))
       let peak = 0
+      let paperCount = 0
+      let midCount = 0
+      let count = 0
+      for (let yy = y0; yy < y1; yy += 1) {
+        const row = yy * width
+        for (let xx = x0; xx < x1; xx += 1) {
+          const i = (row + xx) * 4
+          const red = data[i] ?? 0
+          const green = data[i + 1] ?? 0
+          const blue = data[i + 2] ?? 0
+          const luma = pixelLuma(red, green, blue)
+          const sat = pixelSat(red, green, blue)
+          count += 1
+          if (sat < COLOR_SAT) {
+            paperCount += 1
+            if (luma > peak) peak = luma
+          }
+        }
+      }
       for (let yy = y0; yy < y1; yy += 1) {
         const row = yy * width
         for (let xx = x0; xx < x1; xx += 1) {
           const i = (row + xx) * 4
           const luma = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
-          if (luma > peak) peak = luma
+          if (luma > 36 && luma < peak * 0.85) midCount += 1
         }
       }
-      field[y * sw + x] = peak
+      const id = y * sw + x
+      const midFrac = count > 0 ? midCount / count : 0
+      protect[id] = midFrac > PHOTO_MID ? 1 : 0
+      if (paperCount > 0 && peak > 60) {
+        field[id] = peak
+        paperSum += peak
+        paperN += 1
+      } else {
+        field[id] = 0
+      }
     }
     if (y % 4 === 0) await yieldBusy(clock)
   }
-  field = dilateGray3x3(dilateGray3x3(field, sw, sh), sw, sh)
+  const fallback = paperN > 0 ? paperSum / paperN : 220
+  for (let i = 0; i < field.length; i += 1) {
+    if ((field[i] ?? 0) < 1) field[i] = fallback
+  }
   const radius = Math.max(2, Math.min(BG_BLUR_RADIUS, Math.floor(Math.min(sw, sh) / 2) - 1))
   for (let pass = 0; pass < BG_BLUR_PASSES; pass += 1) {
     boxBlurGray(field, sw, sh, radius)
     await yieldBusy(clock)
   }
-  const span = PAPER_RATIO - INK_RATIO
+  boxBlurGray(protect, sw, sh, 2)
+  return { field, protect, sw, sh }
+}
+
+/**
+ * Local illumination flatten. Paper (ratio ≥ 0.88, low sat) → #FFFFFF.
+ * Color and photo midtones keep continuous RGB; ink gets a smooth S-curve — never a binary cut.
+ */
+async function whiteBalanceRgb(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  clock: { last: number },
+) {
+  const { field, protect, sw, sh } = await estimatePaperField(data, width, height, clock)
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
     for (let x = 0; x < width; x += 1) {
@@ -528,20 +564,25 @@ async function whiteBalanceRgb(
       const luma = pixelLuma(red, green, blue)
       const sat = pixelSat(red, green, blue)
       const bg = sampleBlurred(field, sw, sh, x, y, width, height)
-      const ratio = luma / Math.max(bg, 1)
-      if (ratio > PAPER_RATIO && sat < PAPER_SAT) {
+      const ratio = luma / Math.max(bg, 30)
+      const photo = sampleBlurred(protect, sw, sh, x, y, width, height) > 0.35
+      if (sat > COLOR_SAT || (photo && ratio < PAPER_RATIO)) {
+        const gain = Math.min(255 / Math.max(bg, 30), PHOTO_GAIN_MAX)
+        const out = scaleRgb(red, green, blue, gain)
+        data[i] = out[0]
+        data[i + 1] = out[1]
+        data[i + 2] = out[2]
+      } else if (ratio >= PAPER_RATIO) {
         data[i] = 255
         data[i + 1] = 255
         data[i + 2] = 255
-      } else if (ratio > PAPER_RATIO) {
-        data[i] = red
-        data[i + 1] = green
-        data[i + 2] = blue
       } else {
-        const scale = Math.max(0, (ratio - INK_RATIO) / span) * 0.9 + 0.1
-        data[i] = clamp255(Math.floor(red * scale))
-        data[i + 1] = clamp255(Math.floor(green * scale))
-        data[i + 2] = clamp255(Math.floor(blue * scale))
+        const normalized = Math.min(1, ratio / PAPER_RATIO)
+        const factor = normalized ** CURVE_GAMMA
+        const out = scaleRgb(red, green, blue, factor * 0.95 + 0.05)
+        data[i] = out[0]
+        data[i + 1] = out[1]
+        data[i + 2] = out[2]
       }
       data[i + 3] = 255
     }
@@ -553,7 +594,7 @@ function clampPaperWhite(data: Uint8ClampedArray) {
     const red = data[i] ?? 0
     const green = data[i + 1] ?? 0
     const blue = data[i + 2] ?? 0
-    if (pixelLuma(red, green, blue) >= PAPER_LUMA && pixelSat(red, green, blue) < PAPER_SAT) {
+    if (pixelLuma(red, green, blue) >= PAPER_LUMA && pixelSat(red, green, blue) < COLOR_SAT) {
       data[i] = 255
       data[i + 1] = 255
       data[i + 2] = 255
@@ -607,10 +648,16 @@ function sharpenLuma(image: ImageData) {
           (gray[p + width + 1] ?? 0)) /
         9
       const delta = center - blur
-      if (center >= PAPER_LUMA || Math.abs(delta) < SHARPEN_NOISE) continue
+      const i = p * 4
+      if (
+        center >= PAPER_LUMA ||
+        Math.abs(delta) < SHARPEN_NOISE ||
+        pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) > COLOR_SAT
+      ) {
+        continue
+      }
       const sharp = clamp255(center + SHARPEN_AMOUNT * delta)
       const lift = center > 1 ? sharp / center : 1
-      const i = p * 4
       data[i] = clamp255((data[i] ?? 0) * lift)
       data[i + 1] = clamp255((data[i + 1] ?? 0) * lift)
       data[i + 2] = clamp255((data[i + 2] ?? 0) * lift)
@@ -637,6 +684,8 @@ async function despeckle(
   for (let start = 0; start < n; start += 1) {
     if (start % yieldEvery === 0) await yieldBusy(clock)
     if (seen[start] || (gray[start] ?? 255) >= 128) continue
+    const si = start * 4
+    if (pixelSat(data[si] ?? 0, data[si + 1] ?? 0, data[si + 2] ?? 0) > COLOR_SAT) continue
     let top = 0
     stack[0] = start
     top = 1
