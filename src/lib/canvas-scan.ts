@@ -21,19 +21,19 @@ function isLandscape(corners: Corners): boolean {
   return width > height * 1.15
 }
 
-/** Adaptive flatten + smooth tone stretch. No binary ink cutoff. */
-const BG_DOWN = 8
+/** Local adaptive contrast: ink if darker than nearby paper by INK_DIFF. */
+const BG_DOWN = 16
 const BG_BLUR_RADIUS = 15
 const BG_BLUR_PASSES = 3
-const COLOR_SAT = 0.22
+const COLOR_SAT = 0.2
 const PHOTO_MID = 0.38
 const PAPER_MIN_LUMA = 175
-const PAPER_FLAT = 200
-const INK_FLAT = 110
-const INK_OUT = 40
+const INK_DIFF = 12
+const INK_SPAN = 45
+const INK_FLOOR = 35
 const PAPER_LUMA = 250
 const SAT_BOOST = 1.1
-const SAT_MIN = 0.22
+const SAT_MIN = 0.2
 const SHARPEN_AMOUNT = 1.08
 const SHARPEN_NOISE = 10
 const YIELD_MS = 24
@@ -562,16 +562,9 @@ async function estimatePaperRgb(
   return { fieldR, fieldG, fieldB, protect, sw, sh }
 }
 
-function mapFlatLuma(flat: number) {
-  if (flat >= PAPER_FLAT) return 255
-  if (flat <= INK_FLAT) return Math.floor((flat / INK_FLAT) * INK_OUT)
-  const t = (flat - INK_FLAT) / (PAPER_FLAT - INK_FLAT)
-  return Math.floor(INK_OUT + t * (255 - INK_OUT))
-}
-
 /**
- * Per-channel white point, then a smooth tone stretch.
- * Paper ≥ 200 → #FFFFFF; ink ≤ 110 → charcoal; 110–200 stays a ramp so AA strokes survive.
+ * Local adaptive threshold: compare each pixel to nearby paper, not a global luma cut.
+ * bg − luma > 12 → ink (thin Hebrew stays); else paper → #FFFFFF.
  */
 async function whiteBalanceRgb(
   data: Uint8ClampedArray,
@@ -584,29 +577,34 @@ async function whiteBalanceRgb(
     if (y % 48 === 0) await yieldBusy(clock)
     for (let x = 0; x < width; x += 1) {
       const i = (y * width + x) * 4
-      const srcR = data[i] ?? 0
-      const srcG = data[i + 1] ?? 0
-      const srcB = data[i + 2] ?? 0
+      const red = data[i] ?? 0
+      const green = data[i + 1] ?? 0
+      const blue = data[i + 2] ?? 0
       const bgR = Math.max(sampleBlurred(fieldR, sw, sh, x, y, width, height), 40)
       const bgG = Math.max(sampleBlurred(fieldG, sw, sh, x, y, width, height), 40)
       const bgB = Math.max(sampleBlurred(fieldB, sw, sh, x, y, width, height), 40)
       const bg = Math.max(pixelLuma(bgR, bgG, bgB), 1)
-      const red = clamp255((srcR * 255) / bgR)
-      const green = clamp255((srcG * 255) / bgG)
-      const blue = clamp255((srcB * 255) / bgB)
-      const sat = pixelSat(srcR, srcG, srcB)
+      const luma = pixelLuma(red, green, blue)
+      const sat = pixelSat(red, green, blue)
       const photo = sampleField(protect, sw, sh, x, y, width, height) > 0.35
       if (sat > COLOR_SAT || photo) {
-        const gain = 255 / Math.max(bg, 130)
-        data[i] = clamp255(Math.floor(srcR * gain))
-        data[i + 1] = clamp255(Math.floor(srcG * gain))
-        data[i + 2] = clamp255(Math.floor(srcB * gain))
+        const gain = 255 / Math.max(bg, 110)
+        data[i] = clamp255(Math.round(red * gain))
+        data[i + 1] = clamp255(Math.round(green * gain))
+        data[i + 2] = clamp255(Math.round(blue * gain))
       } else {
-        const flat = pixelLuma(red, green, blue)
-        const outLuma = mapFlatLuma(flat)
-        data[i] = outLuma
-        data[i + 1] = outLuma
-        data[i + 2] = outLuma
+        const diff = bg - luma
+        if (diff > INK_DIFF) {
+          const strokeStrength = Math.min(1, (diff - INK_DIFF) / INK_SPAN)
+          const inkVal = Math.round(INK_FLOOR * (1 - strokeStrength))
+          data[i] = inkVal
+          data[i + 1] = inkVal
+          data[i + 2] = inkVal
+        } else {
+          data[i] = 255
+          data[i + 1] = 255
+          data[i + 2] = 255
+        }
       }
       data[i + 3] = 255
     }
