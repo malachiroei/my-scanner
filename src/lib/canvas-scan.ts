@@ -11,9 +11,22 @@ export type ScanProcessOptions = {
   sourceHeight?: number
 }
 
+function paperWhiteFloor(whiteFloor: number) {
+  return Math.max(232, whiteFloor)
+}
+
+function gentleInkGamma(inkGamma: number) {
+  return Math.min(1.3, Math.max(1.15, inkGamma))
+}
+
 function tuneOf(options?: ScanProcessOptions) {
+  const recipe = options?.recipe ?? DEFAULT_SCAN_RECIPE
   return {
-    recipe: options?.recipe ?? DEFAULT_SCAN_RECIPE,
+    recipe: {
+      ...recipe,
+      whiteFloor: paperWhiteFloor(recipe.whiteFloor),
+      inkGamma: gentleInkGamma(recipe.inkGamma),
+    },
     keepOriginalBoxes: options?.keepOriginalBoxes ?? [],
     corners: options?.corners,
     sourceWidth: options?.sourceWidth,
@@ -21,25 +34,25 @@ function tuneOf(options?: ScanProcessOptions) {
   }
 }
 
-/** 125% of the 3234 page that looked right when the PDF was zoomed to 125%. At least 200 DPI A4. */
-const A4_LONG_MIN = 2339
-const A4_SHORT_MIN = 1654
-const WARP_LONG = Math.max(4042, A4_LONG_MIN)
+/** 300 DPI A4 short edge, or the source paper crop when the sensor already has more pixels. */
+const A4_SHORT = 2480
+const A4_LONG = 3508
 const WARP_SOURCE = 4600
 
-function a4Page(landscape: boolean): { width: number; height: number } {
-  const short = Math.max(A4_SHORT_MIN, Math.round(WARP_LONG / Math.SQRT2))
-  return landscape ? { width: WARP_LONG, height: short } : { width: short, height: WARP_LONG }
-}
-
-/**
- * Landscape when the quad is wider than tall, portrait otherwise. Opposite sides are averaged,
- * so perspective (a near edge longer than the far one) cannot flip the decision.
- */
-function isLandscape(corners: Corners): boolean {
-  const width = (distance(corners.tl, corners.tr) + distance(corners.bl, corners.br)) / 2
-  const height = (distance(corners.tl, corners.bl) + distance(corners.tr, corners.br)) / 2
-  return width > height * 1.15
+function destPage(corners: Corners): { width: number; height: number } {
+  const srcW = (distance(corners.tl, corners.tr) + distance(corners.bl, corners.br)) / 2
+  const srcH = (distance(corners.tl, corners.bl) + distance(corners.tr, corners.br)) / 2
+  const landscape = srcW > srcH * 1.15
+  const srcShort = Math.min(srcW, srcH)
+  const srcLong = Math.max(srcW, srcH)
+  let short = Math.max(A4_SHORT, Math.round(srcShort))
+  let long = Math.max(A4_LONG, Math.round(srcLong), Math.round(short * Math.SQRT2))
+  if (long > WARP_SOURCE) {
+    const scale = WARP_SOURCE / long
+    long = WARP_SOURCE
+    short = Math.max(A4_SHORT, Math.round(short * scale))
+  }
+  return landscape ? { width: long, height: short } : { width: short, height: long }
 }
 
 /** Paper RGB divide only. No ink threshold — that erased Hebrew and photos. */
@@ -580,16 +593,16 @@ function illuminationGrid(strength: ShadowStrength, width: number, height: numbe
   if (strength === 'heavy') {
     const w = 48
     const h = 68
-    return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 16, minBg: 125 }
+    return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 16, minBg: 145 }
   }
   if (strength === 'low') {
     const w = 80
     const h = 112
-    return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 8, minBg: 165 }
+    return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 8, minBg: 145 }
   }
   const w = 64
   const h = 90
-  return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 12, minBg: 140 }
+  return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 12, minBg: 145 }
 }
 
 function sampleBgChannel(
@@ -930,7 +943,7 @@ function clampPaperWhite(
   paper?: { protect: Float32Array; sw: number; sh: number },
 ) {
   const n = width * height
-  const floor = Math.min(PAPER_LUMA, whiteFloor)
+  const floor = Math.max(232, Math.min(PAPER_LUMA, whiteFloor))
   for (let p = 0; p < n; p += 1) {
     const i = p * 4
     const x = p % width
@@ -1457,7 +1470,7 @@ function trimDarkMargins(source: HTMLCanvasElement): HTMLCanvasElement {
   const image = context.getImageData(0, 0, width, height)
   const data = image.data
   const dropYellow = interiorIsWhite(data, width, height)
-  const maxY = Math.floor(height * 0.03)
+  const maxY = 0
   const maxX = Math.floor(width * 0.2)
   let top = 0
   let bottom = height
@@ -1542,9 +1555,10 @@ export async function straightenCanvas(
   corners: Corners,
 ): Promise<HTMLCanvasElement> {
   const copy = drawSource(image)
-  const { width, height } = a4Page(isLandscape(corners))
+  const { width, height } = destPage(corners)
   try {
     const warped = await warpCanvas(copy, corners, width, height)
+    console.log(`[scanner] warped page: ${width}×${height}`)
     if (isFullFrameCorners(corners, copy.width, copy.height)) return warped
     return whitenOuterBorder(trimDarkMargins(trimToPaper(warped)))
   } finally {

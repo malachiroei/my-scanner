@@ -2,20 +2,36 @@ const GEMINI_URL =
   'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
 const MAX_IMAGE_CHARS = 1_800_000
 
-const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This JPEG is the FULL uncropped camera frame. The client will keep the entire frame (corners [0,0]–[1000,1000]) and will NOT crop from your output. Your job is content protection and lighting only.
+const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This JPEG is the FULL uncropped camera frame: a white A4 sheet sitting on a desk, often with a calculator or other objects beside it. The client will perspective-warp from your paperCorners. You must locate the physical sheet.
+
+CRITICAL: Israeli official documents and bills have a horizontal tear-line or colored table header separating the bottom payment stub (barcode + QR) from the main letter. NEVER treat that internal line as the bottom edge of the paper. The true bottom edge (bottomLeft, bottomRight) is ALWAYS the outer physical boundary where the white paper meets the desk BELOW the bottom barcode and bottom-most text.
+
+paperCorners must form a clean near-rectangular quadrilateral on the OUTER physical edges of the white A4 paper — from outer paper edge to outer paper edge. Crop out the desk, calculator, and any surrounding objects completely. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR. Never cut across the page at internal lines or tables.
 
 Return JSON only, with:
-- keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL FRAME. Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, or graphic box that must keep natural color and contrast and must NEVER be whitened. Pad each box generously by at least +20 units on all four sides. Empty array if none.
-- recipe: lighting/contrast for a canvas flatten engine that turns gray room shadows into pure #FFFFFF while keeping fine Hebrew text and barcodes crisp black:
+- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. Frame the outer physical paper edges tightly. The client adds a small +8 unit safety buffer so the bottom barcode is never clipped. x is horizontal, y is vertical.
+- keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, QR code, or graphic box that must keep natural color and contrast and must NEVER be whitened. Pad each box generously by at least +20 units on all four sides. Empty array if none.
+- recipe: lighting/contrast for a canvas flatten engine that turns gray room shadows into pure #FFFFFF while preserving every thin stroke of small Hebrew text:
   - shadowStrength: "low" (even lighting), "medium", or "heavy" (strong side/bottom shadows).
-  - whiteFloor: 205..235. Higher lifts off-white/yellow paper to #FFFFFF. Stay lower (~210) when Hebrew strokes are very thin.
-  - inkGamma: 1.15..1.65. Higher darkens faint/thin text. Keep closer to 1.2 when bold print is already solid.
+  - whiteFloor: 232..240. Only lift true off-white paper background above 232 to #FFFFFF. Never go below 232 — that erases mid-gray thin Hebrew strokes.
+  - inkGamma: 1.15..1.30. Gentle darkening of faint text after illumination flatten. Keep closer to 1.2 when print is already solid.
   - sharpen: 0.20..0.50. Lower on barcodes/dither to avoid white speckles.
 - qaNotes: one short Hebrew sentence (e.g. "זוהו 2 תמונות רכב מוגנות ותאורה אחידה").`
 
 const RESPONSE_SCHEMA = {
   type: 'OBJECT',
   properties: {
+    paperCorners: {
+      type: 'ARRAY',
+      minItems: 4,
+      maxItems: 4,
+      items: {
+        type: 'ARRAY',
+        minItems: 2,
+        maxItems: 2,
+        items: { type: 'NUMBER' },
+      },
+    },
     keepOriginalBoxes: {
       type: 'ARRAY',
       items: {
@@ -37,11 +53,12 @@ const RESPONSE_SCHEMA = {
     },
     qaNotes: { type: 'STRING' },
   },
-  required: ['keepOriginalBoxes', 'recipe', 'qaNotes'],
+  required: ['paperCorners', 'keepOriginalBoxes', 'recipe', 'qaNotes'],
 } as const
 
 export type AnalyzeScanBody =
   | {
+      paperCorners: number[][]
       keepOriginalBoxes: number[][]
       recipe: {
         shadowStrength: 'low' | 'medium' | 'heavy'
@@ -107,10 +124,49 @@ function padBox(box: number[]): number[] {
   ]
 }
 
+function padPaperCorners(pairs: number[][]): number[][] {
+  const points = pairs.map((pair) => ({ x: pair[0] ?? 0, y: pair[1] ?? 0 }))
+  const bySum = [...points].sort((a, b) => a.x + a.y - (b.x + b.y))
+  const tl = bySum[0]
+  const br = bySum[3]
+  const rest = points.filter((point) => point !== tl && point !== br)
+  const first = rest[0]
+  const second = rest[1]
+  if (!tl || !br || !first || !second) return pairs
+  const [tr, bl] = first.x - first.y > second.x - second.y ? [first, second] : [second, first]
+  const pad = 8
+  return [
+    [clamp(tl.x - pad, 0, 1000), clamp(tl.y - pad, 0, 1000)],
+    [clamp(tr.x + pad, 0, 1000), clamp(tr.y - pad, 0, 1000)],
+    [clamp(br.x + pad, 0, 1000), clamp(br.y + pad, 0, 1000)],
+    [clamp(bl.x - pad, 0, 1000), clamp(bl.y + pad, 0, 1000)],
+  ]
+}
+
 function sanitizeDirector(raw: unknown): Exclude<AnalyzeScanBody, { error: string }> | null {
   if (!raw || typeof raw !== 'object') return null
   const record = raw as Record<string, unknown>
   if (!record.recipe || typeof record.recipe !== 'object') return null
+  const cornerRows = Array.isArray(record.paperCorners)
+    ? record.paperCorners
+    : Array.isArray(record.corners)
+      ? record.corners
+      : []
+  const parsedCorners: number[][] = []
+  for (const row of cornerRows) {
+    const pair = Array.isArray(row) ? normalizeCoordList(row, 2) : null
+    if (!pair) break
+    parsedCorners.push(pair)
+  }
+  const paperCorners =
+    parsedCorners.length === 4
+      ? padPaperCorners(parsedCorners)
+      : [
+          [0, 0],
+          [1000, 0],
+          [1000, 1000],
+          [0, 1000],
+        ]
   const keepOriginalBoxes: number[][] = []
   const boxRows = Array.isArray(record.keepOriginalBoxes)
     ? record.keepOriginalBoxes
@@ -124,11 +180,12 @@ function sanitizeDirector(raw: unknown): Exclude<AnalyzeScanBody, { error: strin
   const recipeRaw = record.recipe as Record<string, unknown>
   const shadow = recipeRaw.shadowStrength === 'low' || recipeRaw.shadowStrength === 'heavy' ? recipeRaw.shadowStrength : 'medium'
   return {
+    paperCorners,
     keepOriginalBoxes,
     recipe: {
       shadowStrength: shadow,
-      whiteFloor: clamp(asNumber(recipeRaw.whiteFloor, 218), 205, 235),
-      inkGamma: clamp(asNumber(recipeRaw.inkGamma, 1.4), 1.15, 1.65),
+      whiteFloor: clamp(asNumber(recipeRaw.whiteFloor, 232), 232, 240),
+      inkGamma: clamp(asNumber(recipeRaw.inkGamma, 1.22), 1.15, 1.3),
       sharpen: clamp(asNumber(recipeRaw.sharpen, 0.35), 0.2, 0.5),
     },
     qaNotes: textValue(record.qaNotes).slice(0, 180) || 'המסמך נותח ומוכן לעיבוד.',

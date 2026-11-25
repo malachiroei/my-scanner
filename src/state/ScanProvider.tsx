@@ -226,17 +226,20 @@ export function ScanProvider({ children }: { children: ReactNode }) {
   }
 
   async function applyDirectorToDraft(draft: Draft, director: ScanDirectorResult | null): Promise<Draft> {
-    const corners = fullFrameCorners(draft.width, draft.height)
     if (!director) {
       return {
         ...draft,
-        corners,
+        corners: fullFrameCorners(draft.width, draft.height),
         detected: true,
         detecting: false,
         director: 'fallback',
         qaNotes: null,
       }
     }
+    const corners =
+      director.corners && cornersValid(director.corners, draft.width, draft.height)
+        ? director.corners
+        : fullFrameCorners(draft.width, draft.height)
     return {
       ...draft,
       corners,
@@ -278,7 +281,8 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       processedKeyRef.current = null
       setDraft(next)
 
-      const director = await analyzeCapturedScan(next.sourceUrl)
+      console.log(`[scanner] master photo: ${next.width}×${next.height}`)
+      const director = await analyzeCapturedScan(next.sourceUrl, next.width, next.height)
       if (ingestToken !== detectGen.current) return
       next = await applyDirectorToDraft(next, director)
       if (ingestToken !== detectGen.current) return

@@ -14,10 +14,31 @@ export function isIPad() {
 
 function highResConstraints(facing: 'environment' | 'user'): MediaTrackConstraints {
   return {
-    facingMode: { ideal: facing },
+    facingMode: facing,
     width: { ideal: 4096 },
     height: { ideal: 3072 },
   }
+}
+
+export function logStreamResolution(stream: MediaStream, label = 'video stream') {
+  const track = stream.getVideoTracks()[0]
+  const settings = track?.getSettings() ?? {}
+  console.log(`[scanner] ${label}: ${settings.width ?? '?'}×${settings.height ?? '?'}`)
+}
+
+async function lockHighResTrack(stream: MediaStream) {
+  const track = stream.getVideoTracks()[0]
+  if (!track) return stream
+  try {
+    await track.applyConstraints({
+      width: { ideal: 4096 },
+      height: { ideal: 3072 },
+    })
+  } catch {
+    // Device may reject 4K; keep the stream we already have.
+  }
+  logStreamResolution(stream, 'video track')
+  return stream
 }
 
 async function pickBackCamera(stream: MediaStream, facing: 'environment' | 'user') {
@@ -75,7 +96,7 @@ export async function acquireCameraStream(facing: 'environment' | 'user'): Promi
     }
   }
   if (!stream) throw lastError ?? new Error('no-camera')
-  return await pickBackCamera(stream, facing)
+  return await lockHighResTrack(await pickBackCamera(stream, facing))
 }
 
 let primed: Promise<MediaStream> | null = null

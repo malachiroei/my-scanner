@@ -5,6 +5,7 @@ import {
   consumePrimedCamera,
   isIOS,
   isIPad,
+  logStreamResolution,
   primeCameraGesture,
 } from '../lib/camera'
 import { IMAGE_FILE_ACCEPT } from '../lib/image'
@@ -76,7 +77,9 @@ export function CameraCapture() {
         streamRef.current = stream
         await attachCameraStream(view, stream)
         if (cancelled) return
+        logStreamResolution(stream, 'live preview track')
         if (view.videoWidth > 0) {
+          console.log(`[scanner] live preview: ${view.videoWidth}×${view.videoHeight}`)
           setReady(true)
           return
         }
@@ -142,6 +145,13 @@ export function CameraCapture() {
     try {
       const photo = await takeSensorPhoto()
       if (photo && photo.size > 0) {
+        try {
+          const bitmap = await createImageBitmap(photo)
+          console.log(`[scanner] captured photo (takePhoto): ${bitmap.width}×${bitmap.height}`)
+          bitmap.close()
+        } catch {
+          console.log(`[scanner] captured photo (takePhoto): ${photo.size} bytes`)
+        }
         ingestBlob(photo)
         return
       }
@@ -156,6 +166,7 @@ export function CameraCapture() {
     if (!video || !video.videoWidth) return
     const width = video.videoWidth
     const height = video.videoHeight
+    console.log(`[scanner] captured photo (video frame): ${width}×${height}`)
     const canvas = document.createElement('canvas')
     canvas.width = width
     canvas.height = height

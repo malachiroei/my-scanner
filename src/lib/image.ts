@@ -184,6 +184,12 @@ export async function normalizeImage(blob: Blob): Promise<{ url: string; width: 
   let source = blob
   let bitmap: ImageBitmap | null = null
   try {
+    const encoded = await readEncodedSize(source)
+    if (encoded) console.log(`[scanner] captured photo: ${encoded.width}×${encoded.height}`)
+  } catch {
+    // Header probe is best-effort; decode below still yields the master size.
+  }
+  try {
     bitmap = await decodeSource(source)
   } catch {
     bitmap = null
@@ -221,6 +227,7 @@ export async function normalizeImage(blob: Blob): Promise<{ url: string; width: 
   bitmap.close()
 
   const jpeg = await canvasToJpegBlob(canvas, 0.95)
+  console.log(`[scanner] master photo: ${width}×${height}`)
   return { url: URL.createObjectURL(jpeg), width, height }
 }
 

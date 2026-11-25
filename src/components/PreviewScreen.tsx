@@ -99,6 +99,10 @@ export function PreviewScreen() {
         className="pointer-events-auto relative z-50 shrink-0 touch-manipulation space-y-3 px-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
         style={{ position: 'relative', zIndex: 50, pointerEvents: 'auto', touchAction: 'manipulation' }}
       >
+        <p className="text-center text-xs tabular-nums text-mist/80 dark:text-paper/50">
+          {draft.width}×{draft.height}
+          {preview ? ` → ${preview.width}×${preview.height}` : ''}
+        </p>
         {draft.director === 'analyzing' ? (
           <p className="flex items-center justify-center gap-2 text-center text-sm text-mist dark:text-paper/65">
             <Spinner className="size-4" />
