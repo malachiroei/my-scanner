@@ -230,22 +230,27 @@ export function CameraCapture() {
         muted
         playsInline
       />
-      <svg
-        viewBox="0 0 100 100"
-        preserveAspectRatio="none"
-        className="pointer-events-none absolute inset-[10%]"
-        aria-hidden="true"
-      >
-        <path
-          d="M 0 18 L 0 0 L 18 0 M 82 0 L 100 0 L 100 18 M 100 82 L 100 100 L 82 100 M 18 100 L 0 100 L 0 82"
-          fill="none"
-          stroke="rgba(255,255,255,0.78)"
-          strokeWidth={1.6}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      </svg>
+      <div className="pointer-events-none absolute inset-0 [container-type:size]" aria-hidden="true">
+        <svg
+          viewBox="0 0 1000 1414"
+          preserveAspectRatio="none"
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+          style={{
+            height: '88cqh',
+            width: 'calc(88cqh / 1.414)',
+          }}
+        >
+          <path
+            d="M 0 140 L 0 0 L 140 0 M 860 0 L 1000 0 L 1000 140 M 1000 1274 L 1000 1414 L 860 1414 M 140 1414 L 0 1414 L 0 1274"
+            fill="none"
+            stroke="rgba(255,255,255,0.78)"
+            strokeWidth={1.6}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+      </div>
       <div className="absolute inset-x-0 top-0 flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))]">
         <button
           type="button"

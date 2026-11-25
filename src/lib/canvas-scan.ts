@@ -13,6 +13,22 @@ export type ScanProcessOptions = {
 /** 300 DPI A4 long edge. Output matches the paper quad — never a forced 4:3 / A4 box. */
 const A4_LONG = 3508
 const WARP_SOURCE = 4600
+/** Outward safety pad in 0..1000 paperCorners units so header and barcode are never clipped. */
+const PAPER_PAD_X = 8
+const PAPER_PAD_Y = 18
+
+function padPaperCorners(corners: Corners, width: number, height: number): Corners {
+  const padX = (PAPER_PAD_X / 1000) * width
+  const padY = (PAPER_PAD_Y / 1000) * height
+  const clampX = (value: number) => Math.min(width, Math.max(0, value))
+  const clampY = (value: number) => Math.min(height, Math.max(0, value))
+  return {
+    tl: { x: clampX(corners.tl.x - padX), y: clampY(corners.tl.y - padY) },
+    tr: { x: clampX(corners.tr.x + padX), y: clampY(corners.tr.y - padY) },
+    br: { x: clampX(corners.br.x + padX), y: clampY(corners.br.y + padY) },
+    bl: { x: clampX(corners.bl.x - padX), y: clampY(corners.bl.y + padY) },
+  }
+}
 
 function destPage(corners: Corners): { width: number; height: number } {
   const quadWidth = (distance(corners.tl, corners.tr) + distance(corners.bl, corners.br)) / 2
@@ -380,11 +396,12 @@ function destKeepMask(destW: number, destH: number, options?: ScanProcessOptions
   const sourceH = options?.sourceHeight ?? 0
   const corners = options?.corners
   if (boxes.length === 0 || sourceW < 1 || sourceH < 1 || !corners) return mask
+  const padded = padPaperCorners(corners, sourceW, sourceH)
   const ordered = (() => {
     try {
-      return orderCorners([corners.tl, corners.tr, corners.br, corners.bl])
+      return orderCorners([padded.tl, padded.tr, padded.br, padded.bl])
     } catch {
-      return corners
+      return padded
     }
   })()
   const map = homography(
@@ -879,11 +896,12 @@ export async function straightenCanvas(
   corners: Corners,
 ): Promise<HTMLCanvasElement> {
   const copy = drawSource(image)
-  const { width, height } = destPage(corners)
+  const padded = padPaperCorners(corners, copy.width, copy.height)
+  const { width, height } = destPage(padded)
   try {
-    const warped = await warpCanvas(copy, corners, width, height)
+    const warped = await warpCanvas(copy, padded, width, height)
     console.log(`[scanner] warped page: ${width}×${height}`)
-    if (isFullFrameCorners(corners, copy.width, copy.height)) return warped
+    if (isFullFrameCorners(padded, copy.width, copy.height)) return warped
     return whitenOuterBorder(trimDarkMargins(trimToPaper(warped)))
   } finally {
     copy.width = 0

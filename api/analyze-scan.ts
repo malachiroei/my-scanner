@@ -6,12 +6,14 @@ const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This JP
 
 CRITICAL: Israeli official documents and bills have a horizontal tear-line or colored table header separating the bottom payment stub (barcode + QR) from the main letter. NEVER treat that internal line as the bottom edge of the paper. The true bottom edge (bottomLeft, bottomRight) is ALWAYS the outer physical boundary where the white paper meets the desk BELOW the bottom barcode and bottom-most text.
 
-paperCorners must hug the EXACT physical boundary where the white paper meets the darker desk — left, right, top, and bottom. Crop out the desk, calculator, and any surrounding objects completely. Leave ZERO desk strip on the left and right. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR. Never cut across the page at internal lines or tables.
+IMPORTANT: The bottom 25% of Israeli bills/tickets is a colored or shaded payment stub ('הודעת זיכוי' / 'קבלה') ending with a barcode line at the very bottom, and the top 10% has a postal header/barcode. You MUST include BOTH the top postal header AND the entire bottom colored payment stub + bottom barcode inside paperCorners. Find the actual outer boundary where the white paper ends against the beige/wood desk table — NEVER stop at the border of the colored payment stub.
+
+paperCorners must hug the EXACT physical boundary where the white paper meets the darker desk — left, right, top, and bottom. Crop out the desk, calculator, and any surrounding objects completely. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR. Never cut across the page at internal lines or tables.
 
 If the sheet is portrait A4, paperCorners MUST be a portrait quadrilateral (taller than it is wide) around the paper only. Never return the full landscape camera frame unless the paper truly fills the entire photo.
 
 Return JSON only, with:
-- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. Place each corner on the paper/desk boundary. The client adds only a tiny +5 unit safety margin on the BOTTOM edge so the barcode is never clipped; add NO extra left/right/top margin yourself. x is horizontal, y is vertical.
+- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. Place each corner on the paper/desk boundary. The client adds +18 units on top and bottom and +8 on left/right; add NO extra margin yourself. x is horizontal, y is vertical.
 - keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, or graphic that must keep natural color. Pad each box generously by at least +20 units on all four sides. Empty array if none.
 - qaNotes: one short Hebrew sentence (e.g. "זוהו 2 תמונות רכב מוגנות").`
 
@@ -115,12 +117,11 @@ function padPaperCorners(pairs: number[][]): number[][] {
   const second = rest[1]
   if (!tl || !br || !first || !second) return pairs
   const [tr, bl] = first.x - first.y > second.x - second.y ? [first, second] : [second, first]
-  const padBottom = 5
   return [
     [clamp(tl.x, 0, 1000), clamp(tl.y, 0, 1000)],
     [clamp(tr.x, 0, 1000), clamp(tr.y, 0, 1000)],
-    [clamp(br.x, 0, 1000), clamp(br.y + padBottom, 0, 1000)],
-    [clamp(bl.x, 0, 1000), clamp(bl.y + padBottom, 0, 1000)],
+    [clamp(br.x, 0, 1000), clamp(br.y, 0, 1000)],
+    [clamp(bl.x, 0, 1000), clamp(bl.y, 0, 1000)],
   ]
 }
 
