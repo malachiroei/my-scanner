@@ -56,6 +56,9 @@ function segmentsIntersect(a: Point, b: Point, c: Point, d: Point): boolean {
   return t > eps && t < 1 - eps && u > eps && u < 1 - eps
 }
 
+/** 120 units in 0..1000 space: top edge ~horizontal, left/right ~vertical. */
+const QUAD_ALIGN = 0.12
+
 export function cornersValid(corners: Corners, width: number, height: number): boolean {
   const points = [corners.tl, corners.tr, corners.br, corners.bl]
   const inside = points.every(
@@ -68,6 +71,17 @@ export function cornersValid(corners: Corners, width: number, height: number): b
   const edgeWidth = Math.max(distance(corners.tl, corners.tr), distance(corners.bl, corners.br))
   const edgeHeight = Math.max(distance(corners.tl, corners.bl), distance(corners.tr, corners.br))
   return edgeWidth >= 32 && edgeHeight >= 32
+}
+
+/** Convex paper quad with a roughly upright top and sides. Rejects twisted Gemini pins. */
+export function paperQuadIsStable(corners: Corners, width: number, height: number): boolean {
+  if (!cornersValid(corners, width, height) || !quadIsConvex(corners)) return false
+  const maxDx = QUAD_ALIGN * width
+  const maxDy = QUAD_ALIGN * height
+  if (Math.abs(corners.tl.y - corners.tr.y) >= maxDy) return false
+  if (Math.abs(corners.tl.x - corners.bl.x) >= maxDx) return false
+  if (Math.abs(corners.tr.x - corners.br.x) >= maxDx) return false
+  return true
 }
 
 /** Same-sign cross products around TL→TR→BR→BL. Rejects bows, arrows, and crossed pins. */

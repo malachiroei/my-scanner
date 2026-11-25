@@ -1,5 +1,5 @@
 ﻿import type { Corners, FilterMode, Point, ProtectedBox, ScanRecipe } from '../types'
-import { distance, orderCorners } from './geometry'
+import { orderCorners } from './geometry'
 import { nextFrame } from './image'
 
 export type ScanProcessOptions = {
@@ -14,10 +14,10 @@ export type ScanProcessOptions = {
 const A4_SHORT = 2480
 const A4_LONG = 3508
 const WARP_SOURCE = 4600
-/** Outward centroid expansion in 0..1000 units: keep header/barcode, trim desk on the sides. */
-const PAPER_PAD_X = 4
-const PAPER_PAD_TOP = 55
-const PAPER_PAD_BOTTOM = 55
+/** Outward centroid expansion in 0..1000 units so all four paper corners stay inside the warp. */
+const PAPER_PAD_X = 22
+const PAPER_PAD_TOP = 35
+const PAPER_PAD_BOTTOM = 35
 
 function padPaperCorners(corners: Corners, width: number, height: number): Corners {
   const toN = (point: Point): Point => ({
@@ -52,11 +52,8 @@ function padPaperCorners(corners: Corners, width: number, height: number): Corne
   }
 }
 
-function destPage(corners: Corners): { width: number; height: number } {
-  const quadWidth = (distance(corners.tl, corners.tr) + distance(corners.bl, corners.br)) / 2
-  const quadHeight = (distance(corners.tl, corners.bl) + distance(corners.tr, corners.br)) / 2
-  if (quadHeight >= quadWidth) return { width: A4_SHORT, height: A4_LONG }
-  return { width: A4_LONG, height: A4_SHORT }
+function destPage(_corners: Corners): { width: number; height: number } {
+  return { width: A4_SHORT, height: A4_LONG }
 }
 
 
@@ -299,7 +296,7 @@ function paintScaled(
 }
 
 /**
- * Map the paper trapezoid onto a flat page that keeps the paper's aspect ratio.
+ * Map the four expanded paper corners onto a 2480×3508 A4 rectangle.
  * Inverse homography + bicubic sample. No OpenCV — WASM froze the phone after shutter.
  */
 async function warpCanvas(

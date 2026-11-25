@@ -1,5 +1,5 @@
 import { cornersFromUnit, detectPaperQuad } from './detect'
-import { cornersValid, inwardPageCorners, orderCorners } from './geometry'
+import { cornersValid, inwardPageCorners, orderCorners, paperQuadIsStable } from './geometry'
 import { canvasToJpegBlob, loadImage } from './image'
 import type { Corners, PageRotation, Point, ProtectedBox, ScanRecipe } from '../types'
 
@@ -101,7 +101,7 @@ export function cornersFromDirector(raw: unknown, width: number, height: number)
   })
   try {
     const ordered = orderCorners(pixels)
-    return cornersValid(ordered, width, height) ? ordered : null
+    return paperQuadIsStable(ordered, width, height) ? ordered : null
   } catch {
     return null
   }
