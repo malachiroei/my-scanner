@@ -1,15 +1,24 @@
-const CACHE = 'my-scanner-v3'
+const CACHE = 'my-scanner-v4'
+const skipWaiting = true
+const clientsClaim = true
+const cleanupOutdatedCaches = true
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE).then((cache) => cache.addAll(['/icon-192.png?v=3', '/icon-512.png?v=3', '/apple-touch-icon.png?v=3'])),
   )
-  self.skipWaiting()
+  if (skipWaiting) self.skipWaiting()
 })
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key)))).then(() => self.clients.claim()),
+    (async () => {
+      if (cleanupOutdatedCaches) {
+        const keys = await caches.keys()
+        await Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key)))
+      }
+      if (clientsClaim) await self.clients.claim()
+    })(),
   )
 })
 

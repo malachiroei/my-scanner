@@ -15,6 +15,7 @@ import {
 } from '../lib/image'
 import { cachedMagic, cachedWarp, clearPageCache, loadMagic, pageKey, storeWarp } from '../lib/page-cache'
 import { paintFastFilter, renderBlackWhite, renderMagic, straightenDocument } from '../lib/process'
+import { isChunkLoadError, reloadStaleChunk } from '../lib/pwa-install'
 import type { CaptureHint, Corners, Draft, EngineStatus, FilterMode, PreviewImage, ScanPage, Screen } from '../types'
 import { ScanContext } from './scan-context'
 
@@ -925,7 +926,10 @@ export function ScanProvider({ children }: { children: ReactNode }) {
   async function createPdfFile(emailLimit?: number) {
     const assembled = await assemblePdfPages()
     try {
-      const { buildPagesPdf, pdfFileName } = await import('../lib/pdf')
+      const { buildPagesPdf, pdfFileName } = await import('../lib/pdf').catch((error: unknown) => {
+        reloadStaleChunk()
+        throw error
+      })
       let blob = await buildPagesPdf(assembled.ready)
       if (emailLimit) {
         for (const step of [
@@ -983,6 +987,10 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       }
       resetSession()
     } catch (error) {
+      if (isChunkLoadError(error)) {
+        reloadStaleChunk()
+        return
+      }
       console.error(error)
       setToast(errorMessage(error))
     } finally {
@@ -1010,6 +1018,10 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       resetSession()
       return true
     } catch (error) {
+      if (isChunkLoadError(error)) {
+        reloadStaleChunk()
+        return false
+      }
       console.error(error)
       const detail = error instanceof Error ? error.message : 'שליחת המייל נכשלה.'
       setToast(`${detail} אפשר לשתף או להוריד את הקובץ.`)
@@ -1063,6 +1075,10 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       }
       resetSession()
     } catch (error) {
+      if (isChunkLoadError(error)) {
+        reloadStaleChunk()
+        return
+      }
       console.error(error)
       setToast(errorMessage(error))
     } finally {

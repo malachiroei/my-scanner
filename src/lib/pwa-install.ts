@@ -51,10 +51,36 @@ export async function promptAndroidInstall() {
   return true
 }
 
+const CHUNK_RELOAD_KEY = 'my-scanner-chunk-reload'
+const CHUNK_LOAD_ERROR =
+  /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|Loading chunk [\w.-]+ failed|Unable to preload CSS/i
+
+export function isChunkLoadError(error: unknown) {
+  const message = error instanceof Error ? `${error.name} ${error.message}` : String(error ?? '')
+  return CHUNK_LOAD_ERROR.test(message)
+}
+
+/** One reload when a new deploy invalidates hashed chunks (pdf-*.js). */
+export function reloadStaleChunk() {
+  if (typeof window === 'undefined') return
+  if (sessionStorage.getItem(CHUNK_RELOAD_KEY) === '1') return
+  sessionStorage.setItem(CHUNK_RELOAD_KEY, '1')
+  window.location.reload()
+}
+
 export function registerServiceWorker() {
-  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return
-  if (!import.meta.env.PROD) return
+  if (typeof window === 'undefined') return
+  window.addEventListener('vite:preloadError', (event) => {
+    event.preventDefault()
+    reloadStaleChunk()
+  })
+  window.addEventListener('unhandledrejection', (event) => {
+    if (!isChunkLoadError(event.reason)) return
+    event.preventDefault()
+    reloadStaleChunk()
+  })
+  if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return
   window.addEventListener('load', () => {
-    void navigator.serviceWorker.register('/sw.js?v=3')
+    void navigator.serviceWorker.register('/sw.js?v=4')
   })
 }

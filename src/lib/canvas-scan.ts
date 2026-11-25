@@ -31,8 +31,6 @@ const COLOR_SAT = 0.2
 const PHOTO_MID = 0.38
 const PAPER_MIN_LUMA = 175
 const PAPER_LUMA = 240
-const PAPER_GRAIN = 200
-const INK_GAMMA = 1.28
 const SAT_BOOST = 1.08
 const SAT_MIN = 0.2
 const SHARPEN_AMOUNT = 1.08
@@ -461,10 +459,6 @@ function sampleField(gray: Float32Array, sw: number, sh: number, x: number, y: n
   return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty
 }
 
-function sampleBlurred(gray: Float32Array, sw: number, sh: number, x: number, y: number, width: number, height: number) {
-  return Math.max(1, sampleField(gray, sw, sh, x, y, width, height))
-}
-
 /**
  * Local paper RGB (not luma). Yellow/green ambient light is captured per channel
  * so dividing by it removes the cast instead of scaling it up.
@@ -563,9 +557,108 @@ async function estimatePaperRgb(
   return { fieldR, fieldG, fieldB, protect, sw, sh }
 }
 
+const MIN_BG = 140
+const ILLUM_W = 64
+const ILLUM_H = 90
+
+function sampleBgChannel(gray: Float32Array, sw: number, sh: number, x: number, y: number, width: number, height: number) {
+  return Math.max(MIN_BG, sampleField(gray, sw, sh, x, y, width, height))
+}
+
+function inkSCurve(luma: number) {
+  if (luma >= 225) return 255
+  if (luma <= 40) return luma * 0.85
+  if (luma <= 160) return luma * 0.83
+  const t = (luma - 160) / (225 - 160)
+  const start = 160 * 0.83
+  return start + t * (255 - start)
+}
+
+function emptyIllumination(sw: number, sh: number) {
+  const fieldR = new Float32Array(sw * sh)
+  const fieldG = new Float32Array(sw * sh)
+  const fieldB = new Float32Array(sw * sh)
+  fieldR.fill(220)
+  fieldG.fill(220)
+  fieldB.fill(220)
+  return { fieldR, fieldG, fieldB, sw, sh }
+}
+
+function estimateIllumination(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+): { fieldR: Float32Array; fieldG: Float32Array; fieldB: Float32Array; sw: number; sh: number } {
+  const portrait = height >= width
+  const sw = portrait ? ILLUM_W : ILLUM_H
+  const sh = portrait ? ILLUM_H : ILLUM_W
+  const tiny = document.createElement('canvas')
+  tiny.width = sw
+  tiny.height = sh
+  const tinyCtx = tiny.getContext('2d', { willReadFrequently: true })
+  if (!tinyCtx) return emptyIllumination(sw, sh)
+
+  const down = tinyCtx.createImageData(sw, sh)
+  const out = down.data
+  for (let y = 0; y < sh; y += 1) {
+    const y0 = Math.floor((y * height) / sh)
+    const y1 = Math.max(y0 + 1, Math.floor(((y + 1) * height) / sh))
+    for (let x = 0; x < sw; x += 1) {
+      const x0 = Math.floor((x * width) / sw)
+      const x1 = Math.max(x0 + 1, Math.floor(((x + 1) * width) / sw))
+      let red = 0
+      let green = 0
+      let blue = 0
+      let n = 0
+      for (let yy = y0; yy < y1; yy += 1) {
+        const row = yy * width
+        for (let xx = x0; xx < x1; xx += 1) {
+          const i = (row + xx) * 4
+          red += data[i] ?? 0
+          green += data[i + 1] ?? 0
+          blue += data[i + 2] ?? 0
+          n += 1
+        }
+      }
+      const o = (y * sw + x) * 4
+      const inv = n > 0 ? 1 / n : 0
+      out[o] = red * inv
+      out[o + 1] = green * inv
+      out[o + 2] = blue * inv
+      out[o + 3] = 255
+    }
+  }
+  tinyCtx.putImageData(down, 0, 0)
+
+  const blur = document.createElement('canvas')
+  blur.width = sw
+  blur.height = sh
+  const blurCtx = blur.getContext('2d', { willReadFrequently: true })
+  if (blurCtx) {
+    blurCtx.filter = 'blur(12px)'
+    blurCtx.drawImage(tiny, 0, 0)
+    tinyCtx.drawImage(blur, 0, 0)
+  }
+
+  const pixels = tinyCtx.getImageData(0, 0, sw, sh).data
+  const fieldR = new Float32Array(sw * sh)
+  const fieldG = new Float32Array(sw * sh)
+  const fieldB = new Float32Array(sw * sh)
+  for (let p = 0, i = 0; p < fieldR.length; p += 1, i += 4) {
+    fieldR[p] = Math.max(MIN_BG, pixels[i] ?? MIN_BG)
+    fieldG[p] = Math.max(MIN_BG, pixels[i + 1] ?? MIN_BG)
+    fieldB[p] = Math.max(MIN_BG, pixels[i + 2] ?? MIN_BG)
+  }
+  tiny.width = 0
+  tiny.height = 0
+  blur.width = 0
+  blur.height = 0
+  return { fieldR, fieldG, fieldB, sw, sh }
+}
+
 /**
- * CamScanner-style flatten: divide by local paper RGB, then stop.
- * Near-white paper is mopped to #FFFFFF. Everything else keeps continuous tone.
+ * Large-radius illumination divide (CamScanner / Photoshop divide blend).
+ * Tiny blurred lighting map, clamped so shadows and photos cannot darken the divisor.
  */
 async function whiteBalanceRgb(
   data: Uint8ClampedArray,
@@ -573,7 +666,9 @@ async function whiteBalanceRgb(
   height: number,
   clock: { last: number },
 ) {
-  const { fieldR, fieldG, fieldB, protect, sw, sh } = await estimatePaperRgb(data, width, height, clock)
+  const { protect, sw: pw, sh: ph } = await estimatePaperRgb(data, width, height, clock)
+  const { fieldR, fieldG, fieldB, sw, sh } = estimateIllumination(data, width, height)
+  await yieldBusy(clock)
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
     for (let x = 0; x < width; x += 1) {
@@ -581,38 +676,34 @@ async function whiteBalanceRgb(
       const srcR = data[i] ?? 0
       const srcG = data[i + 1] ?? 0
       const srcB = data[i + 2] ?? 0
-      const bgR = Math.max(sampleBlurred(fieldR, sw, sh, x, y, width, height), 40)
-      const bgG = Math.max(sampleBlurred(fieldG, sw, sh, x, y, width, height), 40)
-      const bgB = Math.max(sampleBlurred(fieldB, sw, sh, x, y, width, height), 40)
-      const red = clamp255((srcR * 255) / bgR)
-      const green = clamp255((srcG * 255) / bgG)
-      const blue = clamp255((srcB * 255) / bgB)
-      const sat = pixelSat(srcR, srcG, srcB)
-      const photo = sampleField(protect, sw, sh, x, y, width, height) > 0.35
+      const bgR = sampleBgChannel(fieldR, sw, sh, x, y, width, height)
+      const bgG = sampleBgChannel(fieldG, sw, sh, x, y, width, height)
+      const bgB = sampleBgChannel(fieldB, sw, sh, x, y, width, height)
+      let red = clamp255((srcR / bgR) * 255)
+      let green = clamp255((srcG / bgG) * 255)
+      let blue = clamp255((srcB / bgB) * 255)
+      const sat = pixelSat(red, green, blue)
       const luma = pixelLuma(red, green, blue)
-      if (photo || sat >= COLOR_SAT) {
-        data[i] = red
-        data[i + 1] = green
-        data[i + 2] = blue
-      } else if (luma >= PAPER_LUMA) {
-        data[i] = 255
-        data[i + 1] = 255
-        data[i + 2] = 255
-      } else if (luma >= PAPER_GRAIN) {
-        data[i] = red
-        data[i + 1] = green
-        data[i + 2] = blue
-      } else {
-        const out = Math.pow(luma / 255, INK_GAMMA) * 255
-        const lift = luma > 1 ? out / luma : 1
-        data[i] = clamp255(red * lift)
-        data[i + 1] = clamp255(green * lift)
-        data[i + 2] = clamp255(blue * lift)
+      if (sat < COLOR_SAT) {
+        const mapped = inkSCurve(luma)
+        if (mapped >= 255) {
+          red = 255
+          green = 255
+          blue = 255
+        } else if (luma > 1) {
+          const lift = mapped / luma
+          red = clamp255(red * lift)
+          green = clamp255(green * lift)
+          blue = clamp255(blue * lift)
+        }
       }
+      data[i] = red
+      data[i + 1] = green
+      data[i + 2] = blue
       data[i + 3] = 255
     }
   }
-  return { protect, sw, sh }
+  return { protect, sw: pw, sh: ph }
 }
 
 const INK_PULL_LUMA = 218
