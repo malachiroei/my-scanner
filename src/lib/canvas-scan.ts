@@ -16,8 +16,8 @@ const A4_LONG = 3508
 const WARP_SOURCE = 4600
 /** Outward centroid expansion in 0..1000 units: keep header/barcode, trim desk on the sides. */
 const PAPER_PAD_X = 4
-const PAPER_PAD_TOP = 25
-const PAPER_PAD_BOTTOM = 28
+const PAPER_PAD_TOP = 55
+const PAPER_PAD_BOTTOM = 55
 
 function padPaperCorners(corners: Corners, width: number, height: number): Corners {
   const toN = (point: Point): Point => ({

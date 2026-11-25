@@ -2,7 +2,7 @@ const GEMINI_URL =
   'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
 const MAX_IMAGE_CHARS = 1_800_000
 
-const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This JPEG is the FULL uncropped camera frame: a white A4 sheet sitting on a desk, often with a calculator, keyboard, or other objects beside it. The client will perspective-warp from your paperCorners. You must locate the physical sheet.
+const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This JPEG is the FULL uncropped camera frame, already rotated to an upright portrait (width < height): a white A4 sheet sitting on a desk, often with a calculator, keyboard, or other objects beside it. The client will perspective-warp from your paperCorners. You must locate the physical sheet.
 
 Locate ALL FOUR outer physical edges of the white A4 paper (left, right, top, and bottom). paperCorners is [topLeft, topRight, bottomRight, bottomLeft] in 0..1000 of this FULL IMAGE. Cut away any keyboard, desk, wood, beige table, calculator, or background on the LEFT, RIGHT, TOP, and BOTTOM. Keep the entire paper sheet inside, including the top postal header and the bottom barcode. Never return the full camera frame [0,0]–[1000,1000] unless the paper truly fills every pixel.
 
@@ -15,7 +15,7 @@ paperCorners must hug the EXACT physical boundary where the white paper meets th
 If the sheet is portrait A4, paperCorners MUST be a portrait quadrilateral (taller than it is wide) around the paper only. Never return the full landscape camera frame unless the paper truly fills the entire photo.
 
 Return JSON only, with:
-- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. Place left/right corners flush with the paper edge. The client expands +4 units on left/right, +25 on top, and +28 on the bottom; add NO extra margin yourself. x is horizontal, y is vertical.
+- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. The JPEG is an upright portrait of the full frame. Place left/right corners flush with the paper edge. The client expands +4 units on left/right and +55 on top and bottom; add NO extra margin yourself. x is horizontal, y is vertical.
 - keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, or graphic that must keep natural color. Pad each box generously by at least +20 units on all four sides. Empty array if none.
 - qaNotes: one short Hebrew sentence (e.g. "זוהו 2 תמונות רכב מוגנות").`
 

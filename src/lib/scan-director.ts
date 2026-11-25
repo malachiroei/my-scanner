@@ -209,13 +209,16 @@ export async function analyzeCapturedScan(
   sourceUrl: string,
   width: number,
   height: number,
+  previewBase64?: string,
 ): Promise<ScanDirectorResult | null> {
-  let imageBase64: string
-  try {
-    imageBase64 = await jpegPreviewBase64(sourceUrl)
-  } catch (error) {
-    console.error('[scanner] analyze-scan preview encode failed:', analyzeErrorReason(error), error)
-    return null
+  let imageBase64 = previewBase64
+  if (!imageBase64) {
+    try {
+      imageBase64 = await jpegPreviewBase64(sourceUrl)
+    } catch (error) {
+      console.error('[scanner] analyze-scan preview encode failed:', analyzeErrorReason(error), error)
+      return null
+    }
   }
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), ANALYZE_TIMEOUT_MS)

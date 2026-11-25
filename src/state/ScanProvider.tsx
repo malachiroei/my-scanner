@@ -261,7 +261,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     setScreen('prepare')
     setBusy('סוכן AI מנתח את המסמך...')
     await nextFrame()
-    let normalized: { url: string; width: number; height: number } | null = null
+    let normalized: { url: string; width: number; height: number; previewBase64: string } | null = null
     try {
       normalized = await normalizeImage(blob)
       const ingestToken = ++detectGen.current
@@ -287,7 +287,12 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       setDraft(next)
 
       console.log(`[scanner] master photo: ${next.width}×${next.height}`)
-      const director = await analyzeCapturedScan(next.sourceUrl, next.width, next.height)
+      const director = await analyzeCapturedScan(
+        next.sourceUrl,
+        next.width,
+        next.height,
+        normalized.previewBase64,
+      )
       if (ingestToken !== detectGen.current) return
       next = await applyDirectorToDraft(next, director)
       if (ingestToken !== detectGen.current) return

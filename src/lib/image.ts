@@ -73,6 +73,62 @@ export function canvasToJpegBlob(canvas: HTMLCanvasElement, quality = 0.95): Pro
   })
 }
 
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer()
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
+}
+
+/** 640px JPEG for Gemini, drawn from the upright master so 0..1000 coords match. */
+export async function jpegPreviewFromCanvas(
+  source: HTMLCanvasElement,
+  maxEdge = 640,
+  quality = 0.72,
+): Promise<string> {
+  const scale = Math.min(1, maxEdge / Math.max(1, source.width, source.height))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(source.width * scale))
+  canvas.height = Math.max(1, Math.round(source.height * scale))
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('לא ניתן להכין תצוגה לניתוח.')
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(source, 0, 0, canvas.width, canvas.height)
+  const jpeg = await canvasToJpegBlob(canvas, quality)
+  canvas.width = 0
+  canvas.height = 0
+  return blobToBase64(jpeg)
+}
+
+/** EXIF-upright pixels, then 90° CW if still landscape so the master is portrait (width < height). */
+function drawUprightPortrait(bitmap: ImageBitmap, destW: number, destH: number): HTMLCanvasElement {
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('לא ניתן להכין את התמונה.')
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.fillStyle = '#ffffff'
+  if (destW >= destH) {
+    canvas.width = destH
+    canvas.height = destW
+    context.fillRect(0, 0, canvas.width, canvas.height)
+    context.translate(canvas.width, 0)
+    context.rotate(Math.PI / 2)
+    context.drawImage(bitmap, 0, 0, destW, destH)
+  } else {
+    canvas.width = destW
+    canvas.height = destH
+    context.fillRect(0, 0, destW, destH)
+    context.drawImage(bitmap, 0, 0, destW, destH)
+  }
+  return canvas
+}
+
 function readU16(bytes: Uint8Array, offset: number): number {
   return ((bytes[offset] ?? 0) << 8) | (bytes[offset + 1] ?? 0)
 }
@@ -180,7 +236,9 @@ async function decodeSource(blob: Blob): Promise<ImageBitmap> {
   }
 }
 
-export async function normalizeImage(blob: Blob): Promise<{ url: string; width: number; height: number }> {
+export async function normalizeImage(
+  blob: Blob,
+): Promise<{ url: string; width: number; height: number; previewBase64: string }> {
   let source = blob
   let bitmap: ImageBitmap | null = null
   try {
@@ -209,26 +267,18 @@ export async function normalizeImage(blob: Blob): Promise<{ url: string; width: 
   if (!bitmap) throw new Error('לא ניתן לפתוח את התמונה. נסה JPEG, PNG או HEIC.')
 
   const scale = Math.min(1, MAX_SOURCE_EDGE / Math.max(bitmap.width, bitmap.height))
-  const width = Math.max(1, Math.round(bitmap.width * scale))
-  const height = Math.max(1, Math.round(bitmap.height * scale))
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-  const context = canvas.getContext('2d')
-  if (!context) {
-    bitmap.close()
-    throw new Error('לא ניתן להכין את התמונה.')
-  }
-  context.imageSmoothingEnabled = true
-  context.imageSmoothingQuality = 'high'
-  context.fillStyle = '#ffffff'
-  context.fillRect(0, 0, width, height)
-  context.drawImage(bitmap, 0, 0, width, height)
+  const destW = Math.max(1, Math.round(bitmap.width * scale))
+  const destH = Math.max(1, Math.round(bitmap.height * scale))
+  const master = drawUprightPortrait(bitmap, destW, destH)
   bitmap.close()
-
-  const jpeg = await canvasToJpegBlob(canvas, 0.95)
-  console.log(`[scanner] master photo: ${width}×${height}`)
-  return { url: URL.createObjectURL(jpeg), width, height }
+  const width = master.width
+  const height = master.height
+  const previewBase64 = await jpegPreviewFromCanvas(master)
+  const jpeg = await canvasToJpegBlob(master, 0.95)
+  master.width = 0
+  master.height = 0
+  console.log(`[scanner] master photo: ${width}×${height} (upright portrait)`)
+  return { url: URL.createObjectURL(jpeg), width, height, previewBase64 }
 }
 
 export function downloadUrl(url: string, filename: string) {
