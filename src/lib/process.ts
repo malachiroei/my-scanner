@@ -24,7 +24,7 @@ async function renderWithCanvas(
   return { canvas, width: canvas.width, height: canvas.height }
 }
 
-/** Perspective warp onto a canvas matching the paper's aspect ratio. */
+/** Perspective warp onto a 300 DPI A4 canvas (2480×3508 portrait). */
 export async function straightenDocument(
   image: CanvasImageSource,
   corners: Corners,

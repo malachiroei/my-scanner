@@ -10,40 +10,52 @@ export type ScanProcessOptions = {
   sourceHeight?: number
 }
 
-/** 300 DPI A4 long edge. Output matches the paper quad — never a forced 4:3 / A4 box. */
+/** 300 DPI A4. Portrait sheets always warp to this exact page. */
+const A4_SHORT = 2480
 const A4_LONG = 3508
 const WARP_SOURCE = 4600
-/** Outward safety pad in 0..1000 paperCorners units so header and barcode are never clipped. */
-const PAPER_PAD_X = 8
-const PAPER_PAD_Y = 18
+/** Outward centroid expansion in 0..1000 units so header, margins, and barcode stay inside. */
+const PAPER_PAD = 25
+const PAPER_PAD_BOTTOM = 28
 
 function padPaperCorners(corners: Corners, width: number, height: number): Corners {
-  const padX = (PAPER_PAD_X / 1000) * width
-  const padY = (PAPER_PAD_Y / 1000) * height
-  const clampX = (value: number) => Math.min(width, Math.max(0, value))
-  const clampY = (value: number) => Math.min(height, Math.max(0, value))
+  const toN = (point: Point): Point => ({
+    x: (point.x / Math.max(1, width)) * 1000,
+    y: (point.y / Math.max(1, height)) * 1000,
+  })
+  const fromN = (point: Point): Point => ({
+    x: Math.min(width, Math.max(0, (point.x / 1000) * width)),
+    y: Math.min(height, Math.max(0, (point.y / 1000) * height)),
+  })
+  const tl = toN(corners.tl)
+  const tr = toN(corners.tr)
+  const br = toN(corners.br)
+  const bl = toN(corners.bl)
+  const cx = (tl.x + tr.x + br.x + bl.x) / 4
+  const cy = (tl.y + tr.y + br.y + bl.y) / 4
+  const clampN = (value: number) => Math.min(1000, Math.max(0, value))
+  const push = (point: Point, padX: number, padY: number): Point => {
+    const dx = point.x - cx
+    const dy = point.y - cy
+    const ax = Math.abs(dx)
+    const ay = Math.abs(dy)
+    const sx = ax < 0.5 ? 1 : (ax + padX) / ax
+    const sy = ay < 0.5 ? 1 : (ay + padY) / ay
+    return { x: clampN(cx + dx * sx), y: clampN(cy + dy * sy) }
+  }
   return {
-    tl: { x: clampX(corners.tl.x - padX), y: clampY(corners.tl.y - padY) },
-    tr: { x: clampX(corners.tr.x + padX), y: clampY(corners.tr.y - padY) },
-    br: { x: clampX(corners.br.x + padX), y: clampY(corners.br.y + padY) },
-    bl: { x: clampX(corners.bl.x - padX), y: clampY(corners.bl.y + padY) },
+    tl: fromN(push(tl, PAPER_PAD, PAPER_PAD)),
+    tr: fromN(push(tr, PAPER_PAD, PAPER_PAD)),
+    br: fromN(push(br, PAPER_PAD, PAPER_PAD_BOTTOM)),
+    bl: fromN(push(bl, PAPER_PAD, PAPER_PAD_BOTTOM)),
   }
 }
 
 function destPage(corners: Corners): { width: number; height: number } {
   const quadWidth = (distance(corners.tl, corners.tr) + distance(corners.bl, corners.br)) / 2
   const quadHeight = (distance(corners.tl, corners.bl) + distance(corners.tr, corners.br)) / 2
-  const longEdge = Math.max(quadWidth, quadHeight, 1)
-  const scale = A4_LONG / longEdge
-  let width = Math.max(1, Math.round(quadWidth * scale))
-  let height = Math.max(1, Math.round(quadHeight * scale))
-  const cap = Math.max(width, height)
-  if (cap > WARP_SOURCE) {
-    const shrink = WARP_SOURCE / cap
-    width = Math.max(1, Math.round(width * shrink))
-    height = Math.max(1, Math.round(height * shrink))
-  }
-  return { width, height }
+  if (quadHeight >= quadWidth) return { width: A4_SHORT, height: A4_LONG }
+  return { width: A4_LONG, height: A4_SHORT }
 }
 
 
@@ -370,17 +382,6 @@ function pixelLuma(r: number, g: number, b: number) {
   return 0.299 * r + 0.587 * g + 0.114 * b
 }
 
-function isFullFrameCorners(corners: Corners, width: number, height: number) {
-  const xs = [corners.tl.x, corners.tr.x, corners.br.x, corners.bl.x]
-  const ys = [corners.tl.y, corners.tr.y, corners.br.y, corners.bl.y]
-  return (
-    Math.min(...xs) <= width * 0.02 &&
-    Math.max(...xs) >= width * 0.98 &&
-    Math.min(...ys) <= height * 0.02 &&
-    Math.max(...ys) >= height * 0.98
-  )
-}
-
 function pointInKeepBox(nx: number, ny: number, boxes: ProtectedBox[]) {
   for (const [ymin, xmin, ymax, xmax] of boxes) {
     if (ny >= ymin && ny <= ymax && nx >= xmin && nx <= xmax) return true
@@ -570,305 +571,6 @@ async function applyFastBlackWhite(image: ImageData, options?: ScanProcessOption
 
 
 
-function cropCanvas(source: HTMLCanvasElement, left: number, top: number, right: number, bottom: number) {
-  const cropW = right - left
-  const cropH = bottom - top
-  if (cropW < 64 || cropH < 64) return source
-  if (left <= 0 && top <= 0 && right >= source.width && bottom >= source.height) return source
-  const canvas = document.createElement('canvas')
-  canvas.width = cropW
-  canvas.height = cropH
-  const next = canvas.getContext('2d')
-  if (!next) return source
-  highQuality(next)
-  next.drawImage(source, left, top, cropW, cropH, 0, 0, cropW, cropH)
-  return canvas
-}
-
-function otsuThreshold(gray: Uint8Array) {
-  const hist = new Uint32Array(256)
-  for (let i = 0; i < gray.length; i += 1) hist[gray[i] ?? 0] += 1
-  const total = gray.length
-  let sumAll = 0
-  for (let level = 0; level < 256; level += 1) sumAll += level * (hist[level] ?? 0)
-  let weightBack = 0
-  let sumBack = 0
-  let best = -1
-  let threshold = 170
-  for (let level = 0; level < 256; level += 1) {
-    weightBack += hist[level] ?? 0
-    if (weightBack === 0) continue
-    const weightFront = total - weightBack
-    if (weightFront === 0) break
-    sumBack += level * (hist[level] ?? 0)
-    const meanBack = sumBack / weightBack
-    const meanFront = (sumAll - sumBack) / weightFront
-    const between = weightBack * weightFront * (meanBack - meanFront) ** 2
-    if (between > best) {
-      best = between
-      threshold = level
-    }
-  }
-  return threshold
-}
-
-function sampleLine(
-  mask: Uint8Array,
-  luma: Uint8Array,
-  chroma: Uint8Array,
-  width: number,
-  height: number,
-  axis: 'row' | 'col',
-  index: number,
-) {
-  const span = axis === 'row' ? width : height
-  let paper = 0
-  let dark = 0
-  let yellow = 0
-  let midtone = 0
-  let color = 0
-  let sum = 0
-  let midPaper = 0
-  const mid0 = (span * 0.22) | 0
-  const mid1 = (span * 0.78) | 0
-  for (let k = 0; k < span; k += 1) {
-    const p = axis === 'row' ? index * width + k : k * width + index
-    const tone = luma[p] ?? 0
-    const sat = chroma[p] ?? 0
-    sum += tone
-    if (tone < 70) dark += 1
-    if (tone > 70 && tone < 200) midtone += 1
-    if (sat > 28) color += 1
-    if (tone > 160 && sat > 28) yellow += 1
-    if (mask[p]) {
-      paper += 1
-      if (k >= mid0 && k < mid1) midPaper += 1
-    }
-  }
-  const midN = Math.max(1, mid1 - mid0)
-  return {
-    paper: paper / span,
-    dark: dark / span,
-    yellow: yellow / span,
-    midtone: midtone / span,
-    color: color / span,
-    mean: sum / span,
-    midPaper: midPaper / midN,
-  }
-}
-
-/** Axis-aligned crop to the white page. Beige desk stays out; blue letterheads stay in. */
-function trimToPaper(source: HTMLCanvasElement): HTMLCanvasElement {
-  const { width, height } = source
-  const maxEdge = 420
-  const scale = Math.min(1, maxEdge / Math.max(width, height))
-  const sw = Math.max(1, Math.round(width * scale))
-  const sh = Math.max(1, Math.round(height * scale))
-  const sample = document.createElement('canvas')
-  sample.width = sw
-  sample.height = sh
-  const context = sample.getContext('2d', { willReadFrequently: true })
-  if (!context) return source
-  context.imageSmoothingEnabled = false
-  context.drawImage(source, 0, 0, sw, sh)
-  const data = context.getImageData(0, 0, sw, sh).data
-  const gray = new Uint8Array(sw * sh)
-  const chroma = new Uint8Array(sw * sh)
-  const mask = new Uint8Array(sw * sh)
-  for (let p = 0, i = 0; p < gray.length; p += 1, i += 4) {
-    const r = data[i] ?? 0
-    const g = data[i + 1] ?? 0
-    const b = data[i + 2] ?? 0
-    const tone = pixelLuma(r, g, b) | 0
-    gray[p] = tone
-    const sat = Math.max(r, g, b) - Math.min(r, g, b)
-    chroma[p] = sat
-    if (tone > 148 && sat < 38) mask[p] = 1
-  }
-  const threshold = Math.min(185, Math.max(148, otsuThreshold(gray)))
-  for (let p = 0; p < mask.length; p += 1) {
-    if ((gray[p] ?? 0) <= threshold) mask[p] = 0
-  }
-  const seen = new Uint8Array(mask.length)
-  const stack = new Int32Array(mask.length)
-  let bestCount = 0
-  let best = { minX: 0, minY: 0, maxX: sw - 1, maxY: sh - 1 }
-  for (let start = 0; start < mask.length; start += 1) {
-    if (seen[start] || !mask[start]) continue
-    let top = 0
-    stack[0] = start
-    top = 1
-    seen[start] = 1
-    let count = 0
-    let minX = sw
-    let minY = sh
-    let maxX = 0
-    let maxY = 0
-    while (top > 0) {
-      top -= 1
-      const index = stack[top] ?? 0
-      count += 1
-      const x = index % sw
-      const y = (index - x) / sw
-      if (x < minX) minX = x
-      if (y < minY) minY = y
-      if (x > maxX) maxX = x
-      if (y > maxY) maxY = y
-      if (x > 0 && !seen[index - 1] && mask[index - 1]) {
-        seen[index - 1] = 1
-        stack[top] = index - 1
-        top += 1
-      }
-      if (x + 1 < sw && !seen[index + 1] && mask[index + 1]) {
-        seen[index + 1] = 1
-        stack[top] = index + 1
-        top += 1
-      }
-      if (y > 0 && !seen[index - sw] && mask[index - sw]) {
-        seen[index - sw] = 1
-        stack[top] = index - sw
-        top += 1
-      }
-      if (y + 1 < sh && !seen[index + sw] && mask[index + sw]) {
-        seen[index + sw] = 1
-        stack[top] = index + sw
-        top += 1
-      }
-    }
-    if (count > bestCount) {
-      bestCount = count
-      best = { minX, minY, maxX, maxY }
-    }
-  }
-  const linePage = (axis: 'row' | 'col', index: number) => {
-    const stats = sampleLine(mask, gray, chroma, sw, sh, axis, index)
-    return stats.paper > 0.3 && stats.dark < 0.22 && stats.yellow < 0.28
-  }
-  const lineWeak = (axis: 'row' | 'col', index: number) => {
-    const stats = sampleLine(mask, gray, chroma, sw, sh, axis, index)
-    if (stats.midPaper > 0.48) return false
-    if (stats.midtone > 0.2 || stats.color > 0.08) return false
-    return stats.paper < 0.4 && (stats.dark > 0.12 || stats.yellow > 0.25 || stats.paper < 0.22)
-  }
-  let left = best.minX
-  let right = best.maxX
-  let top = best.minY
-  let bottom = best.maxY
-  while (left > 0 && linePage('col', left - 1)) left -= 1
-  while (right + 1 < sw && linePage('col', right + 1)) right += 1
-  while (top > 0 && linePage('row', top - 1)) top -= 1
-  while (bottom + 1 < sh && linePage('row', bottom + 1)) bottom += 1
-  const maxX = (sw * 0.22) | 0
-  const maxY = (sh * 0.12) | 0
-  while (left < maxX && left < right && lineWeak('col', left)) left += 1
-  while (right > sw - 1 - maxX && right > left && lineWeak('col', right)) right -= 1
-  while (bottom > sh - 1 - maxY && bottom > top && lineWeak('row', bottom)) bottom -= 1
-  sample.width = 0
-  sample.height = 0
-  if (bestCount < gray.length * 0.16) return source
-  const inv = 1 / scale
-  const padX = 2
-  const padY = 2
-  const cropL = Math.max(0, Math.floor(left * inv) - padX)
-  const cropT = Math.max(0, Math.floor(top * inv) - padY)
-  const cropR = Math.min(width, Math.ceil((right + 1) * inv) + padX)
-  const cropB = Math.min(height, Math.ceil((bottom + 1) * inv) + padY)
-  if (cropR - cropL < width * 0.28 || cropB - cropT < height * 0.28) return source
-  if (cropL <= 6 && cropT <= 6 && cropR >= width - 6 && cropB >= height - 6) return source
-  return cropCanvas(source, cropL, cropT, cropR, cropB)
-}
-
-function edgeIsBackdrop(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  axis: 'row' | 'col',
-  index: number,
-  dropYellow: boolean,
-) {
-  const span = axis === 'row' ? width : height
-  const mid0 = (span * 0.22) | 0
-  const mid1 = (span * 0.78) | 0
-  let dark = 0
-  let paper = 0
-  let yellow = 0
-  let midtone = 0
-  let color = 0
-  let midPaper = 0
-  let sum = 0
-  for (let k = 0; k < span; k += 1) {
-    const i = axis === 'row' ? (index * width + k) * 4 : (k * width + index) * 4
-    const r = data[i] ?? 0
-    const g = data[i + 1] ?? 0
-    const b = data[i + 2] ?? 0
-    const luma = pixelLuma(r, g, b)
-    const sat = Math.max(r, g, b) - Math.min(r, g, b)
-    sum += luma
-    if (luma < 70) dark += 1
-    if (luma > 70 && luma < 200) midtone += 1
-    if (sat > 28) color += 1
-    if (luma > 160 && sat > 28) yellow += 1
-    if (luma > 200 && sat < 22) {
-      paper += 1
-      if (k >= mid0 && k < mid1) midPaper += 1
-    } else if (!dropYellow && luma > 200 && k >= mid0 && k < mid1) {
-      midPaper += 1
-    }
-  }
-  if (midPaper > (mid1 - mid0) * 0.48) return false
-  if (midtone > span * 0.2 || color > span * 0.08) return false
-  if (paper < span * 0.12 && (sum / span < 80 || dark > span * 0.4)) return true
-  if (!dropYellow) return false
-  return paper < span * 0.4 && (dark > span * 0.12 || yellow > span * 0.25 || paper < span * 0.22)
-}
-
-function interiorIsWhite(data: Uint8ClampedArray, width: number, height: number) {
-  const x0 = (width * 0.25) | 0
-  const x1 = (width * 0.75) | 0
-  const y0 = (height * 0.25) | 0
-  const y1 = (height * 0.75) | 0
-  let sat = 0
-  let n = 0
-  for (let y = y0; y < y1; y += 3) {
-    for (let x = x0; x < x1; x += 3) {
-      const i = (y * width + x) * 4
-      const r = data[i] ?? 0
-      const g = data[i + 1] ?? 0
-      const b = data[i + 2] ?? 0
-      if (pixelLuma(r, g, b) < 200) continue
-      sat += Math.max(r, g, b) - Math.min(r, g, b)
-      n += 1
-    }
-  }
-  return n > 40 && sat / n < 16
-}
-
-/** Drop keyboard / beige-desk strips. Sides first so a header is not sliced off with the bezel. */
-function trimDarkMargins(source: HTMLCanvasElement): HTMLCanvasElement {
-  const context = source.getContext('2d', { willReadFrequently: true })
-  if (!context) return source
-  const { width, height } = source
-  const image = context.getImageData(0, 0, width, height)
-  const data = image.data
-  const dropYellow = interiorIsWhite(data, width, height)
-  const maxY = 0
-  const maxX = Math.floor(width * 0.2)
-  let top = 0
-  let bottom = height
-  let left = 0
-  let right = width
-  while (left < maxX && edgeIsBackdrop(data, width, height, 'col', left, dropYellow)) left += 1
-  while (right - 1 > width - 1 - maxX && right - 1 > left + 32 && edgeIsBackdrop(data, width, height, 'col', right - 1, dropYellow)) {
-    right -= 1
-  }
-  while (top < maxY && edgeIsBackdrop(data, width, height, 'row', top, dropYellow)) top += 1
-  while (bottom - 1 > height - 1 - maxY && bottom - 1 > top + 32 && edgeIsBackdrop(data, width, height, 'row', bottom - 1, dropYellow)) {
-    bottom -= 1
-  }
-  if (top === 0 && bottom === height && left === 0 && right === width) return source
-  return cropCanvas(source, left, top, right, bottom)
-}
-
 export function desaturateCanvas(canvas: HTMLCanvasElement): HTMLCanvasElement {
   const context = canvas.getContext('2d', { willReadFrequently: true })
   if (!context) return canvas
@@ -876,19 +578,6 @@ export function desaturateCanvas(canvas: HTMLCanvasElement): HTMLCanvasElement {
   desaturatePixels(image.data)
   context.putImageData(image, 0, 0)
   return canvas
-}
-
-function whitenOuterBorder(source: HTMLCanvasElement) {
-  const context = source.getContext('2d')
-  if (!context) return source
-  const { width, height } = source
-  const inset = Math.max(8, Math.round(0.005 * Math.min(width, height)))
-  context.fillStyle = '#ffffff'
-  context.fillRect(0, 0, width, inset)
-  context.fillRect(0, height - inset, width, inset)
-  context.fillRect(0, 0, inset, height)
-  context.fillRect(width - inset, 0, inset, height)
-  return source
 }
 
 export async function straightenCanvas(
@@ -901,8 +590,7 @@ export async function straightenCanvas(
   try {
     const warped = await warpCanvas(copy, padded, width, height)
     console.log(`[scanner] warped page: ${width}×${height}`)
-    if (isFullFrameCorners(padded, copy.width, copy.height)) return warped
-    return whitenOuterBorder(trimDarkMargins(trimToPaper(warped)))
+    return warped
   } finally {
     copy.width = 0
     copy.height = 0

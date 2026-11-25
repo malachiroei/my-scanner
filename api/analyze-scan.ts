@@ -15,7 +15,7 @@ paperCorners must hug the EXACT physical boundary where the white paper meets th
 If the sheet is portrait A4, paperCorners MUST be a portrait quadrilateral (taller than it is wide) around the paper only. Never return the full landscape camera frame unless the paper truly fills the entire photo.
 
 Return JSON only, with:
-- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. Place each corner on the paper/desk boundary. The client adds +18 units on top and bottom and +8 on left/right; add NO extra margin yourself. x is horizontal, y is vertical.
+- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. Place each corner on the paper/desk boundary. The client expands every corner outward from the quad centroid by at least +25 units (bottom +28); add NO extra margin yourself. x is horizontal, y is vertical.
 - keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, or graphic that must keep natural color. Pad each box generously by at least +20 units on all four sides. Empty array if none.
 - qaNotes: one short Hebrew sentence (e.g. "זוהו 2 תמונות רכב מוגנות").`
 
