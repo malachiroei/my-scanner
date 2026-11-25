@@ -5,13 +5,19 @@ import { DEFAULT_SCAN_RECIPE } from './scan-director'
 
 export type ScanProcessOptions = {
   recipe?: ScanRecipe
-  protectedBoxes?: ProtectedBox[]
+  keepOriginalBoxes?: ProtectedBox[]
+  corners?: Corners
+  sourceWidth?: number
+  sourceHeight?: number
 }
 
 function tuneOf(options?: ScanProcessOptions) {
   return {
     recipe: options?.recipe ?? DEFAULT_SCAN_RECIPE,
-    protectedBoxes: options?.protectedBoxes ?? [],
+    keepOriginalBoxes: options?.keepOriginalBoxes ?? [],
+    corners: options?.corners,
+    sourceWidth: options?.sourceWidth,
+    sourceHeight: options?.sourceHeight,
   }
 }
 
@@ -608,23 +614,53 @@ function inkSCurve(luma: number, whiteFloor: number) {
   return start + t * (255 - start)
 }
 
-function markProtectedBoxes(
+function pointInKeepBox(nx: number, ny: number, boxes: ProtectedBox[]) {
+  for (const [ymin, xmin, ymax, xmax] of boxes) {
+    if (ny >= ymin && ny <= ymax && nx >= xmin && nx <= xmax) return true
+  }
+  return false
+}
+
+/** keepOriginalBoxes are 0..1000 on the full uncropped photo; map dest cells back to that photo. */
+function markKeepOriginalBoxes(
   protect: Float32Array,
   sw: number,
   sh: number,
-  boxes: ProtectedBox[],
+  destW: number,
+  destH: number,
+  options: ScanProcessOptions,
 ) {
+  const boxes = options.keepOriginalBoxes ?? []
   if (boxes.length === 0) return
+  const sourceW = options.sourceWidth ?? 0
+  const sourceH = options.sourceHeight ?? 0
+  const corners = options.corners
+  if (sourceW < 1 || sourceH < 1 || !corners) return
+  const ordered = (() => {
+    try {
+      return orderCorners([corners.tl, corners.tr, corners.br, corners.bl])
+    } catch {
+      return corners
+    }
+  })()
+  const map = homography(
+    [
+      { x: 0, y: 0 },
+      { x: destW, y: 0 },
+      { x: destW, y: destH },
+      { x: 0, y: destH },
+    ],
+    [ordered.tl, ordered.tr, ordered.br, ordered.bl],
+  )
+  if (!map) return
   for (let y = 0; y < sh; y += 1) {
-    const py = ((y + 0.5) / sh) * 1000
+    const destY = ((y + 0.5) / sh) * destH
     for (let x = 0; x < sw; x += 1) {
-      const px = ((x + 0.5) / sw) * 1000
-      for (const [ymin, xmin, ymax, xmax] of boxes) {
-        if (py >= ymin && py <= ymax && px >= xmin && px <= xmax) {
-          protect[y * sw + x] = 1
-          break
-        }
-      }
+      const destX = ((x + 0.5) / sw) * destW
+      const source = mapHomography(map, destX, destY)
+      const nx = (source.x / sourceW) * 1000
+      const ny = (source.y / sourceH) * 1000
+      if (pointInKeepBox(nx, ny, boxes)) protect[y * sw + x] = 1
     }
   }
 }
@@ -721,9 +757,14 @@ async function whiteBalanceRgb(
   clock: { last: number },
   options?: ScanProcessOptions,
 ) {
-  const { recipe, protectedBoxes } = tuneOf(options)
+  const { recipe, keepOriginalBoxes, corners, sourceWidth, sourceHeight } = tuneOf(options)
   const { protect, sw: pw, sh: ph } = await estimatePaperRgb(data, width, height, clock)
-  markProtectedBoxes(protect, pw, ph, protectedBoxes)
+  markKeepOriginalBoxes(protect, pw, ph, width, height, {
+    keepOriginalBoxes,
+    corners,
+    sourceWidth,
+    sourceHeight,
+  })
   const { fieldR, fieldG, fieldB, sw, sh, minBg } = estimateIllumination(data, width, height, recipe)
   await yieldBusy(clock)
   for (let y = 0; y < height; y += 1) {
@@ -741,7 +782,8 @@ async function whiteBalanceRgb(
       let blue = clamp255((srcB / bgB) * 255)
       const sat = pixelSat(red, green, blue)
       const luma = pixelLuma(red, green, blue)
-      if (sat < COLOR_SAT) {
+      const kept = sampleField(protect, pw, ph, x, y, width, height) > 0.35
+      if (!kept && sat < COLOR_SAT) {
         const mapped = inkSCurve(luma, recipe.whiteFloor)
         if (mapped >= 255) {
           red = 255

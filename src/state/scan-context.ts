@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import type { CaptureHint, Corners, Draft, EngineStatus, FilterMode, PreviewImage, ScanPage, Screen } from '../types'
+import type { Corners, Draft, EngineStatus, FilterMode, PreviewImage, ScanPage, Screen } from '../types'
 
 export type ScanContextValue = {
   theme: 'light' | 'dark'
@@ -19,7 +19,7 @@ export type ScanContextValue = {
   openCamera: () => void
   closeCamera: () => void
   ingestFile: (file: File) => void
-  ingestBlob: (blob: Blob, hint?: CaptureHint) => void
+  ingestBlob: (blob: Blob) => void
   updateCorners: (corners: Corners) => void
   resetDetection: () => Promise<void>
   resetPins: () => void

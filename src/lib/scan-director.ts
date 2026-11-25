@@ -15,7 +15,7 @@ const PREVIEW_MAX_WIDTH = 768
 export type ScanDirectorResult = {
   corners: Corners | null
   rotation: PageRotation
-  protectedBoxes: ProtectedBox[]
+  keepOriginalBoxes: ProtectedBox[]
   recipe: ScanRecipe
   qaNotes: string
 }
@@ -173,13 +173,16 @@ export function parseDirectorPayload(payload: unknown, width: number, height: nu
   const record = payload as Record<string, unknown>
   const rotationRaw = typeof record.rotation === 'number' ? record.rotation : 0
   const rotation: PageRotation = rotationRaw === 90 || rotationRaw === 180 || rotationRaw === 270 ? rotationRaw : 0
-  const boxes = Array.isArray(record.protectedBoxes)
-    ? record.protectedBoxes.map(asBox).filter((box): box is ProtectedBox => box !== null)
-    : []
+  const boxRows = Array.isArray(record.keepOriginalBoxes)
+    ? record.keepOriginalBoxes
+    : Array.isArray(record.protectedBoxes)
+      ? record.protectedBoxes
+      : []
+  const boxes = boxRows.map(asBox).filter((box): box is ProtectedBox => box !== null)
   return {
-    corners: cornersFromDirector(record.corners, width, height),
+    corners: cornersFromDirector(record.paperCorners ?? record.corners, width, height),
     rotation,
-    protectedBoxes: boxes,
+    keepOriginalBoxes: boxes,
     recipe: parseRecipe(record.recipe),
     qaNotes: typeof record.qaNotes === 'string' && record.qaNotes.trim() ? record.qaNotes.trim().slice(0, 180) : '',
   }

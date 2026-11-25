@@ -6,7 +6,7 @@ export type ShadowStrength = 'low' | 'medium' | 'heavy'
 
 export type PageRotation = 0 | 90 | 180 | 270
 
-/** Gemini box on the paper sheet: [ymin, xmin, ymax, xmax] in 0..1000. */
+/** Gemini box on the full uncropped photo: [ymin, xmin, ymax, xmax] in 0..1000. */
 export type ProtectedBox = [number, number, number, number]
 
 export type ScanRecipe = {
@@ -37,7 +37,7 @@ export type Draft = {
   snapToken: number
   editingId: string | null
   recipe: ScanRecipe
-  protectedBoxes: ProtectedBox[]
+  keepOriginalBoxes: ProtectedBox[]
   qaNotes: string | null
   director: ScanDirectorStatus
 }
@@ -55,7 +55,7 @@ export type ScanPage = {
   resultWidth: number
   resultHeight: number
   recipe: ScanRecipe
-  protectedBoxes: ProtectedBox[]
+  keepOriginalBoxes: ProtectedBox[]
   qaNotes: string | null
 }
 

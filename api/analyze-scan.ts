@@ -2,16 +2,16 @@ const GEMINI_URL =
   'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
 const MAX_IMAGE_CHARS = 1_800_000
 
-const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. Inspect this photo of a paper document (often Hebrew forms, receipts, or Israeli traffic tickets with vehicle photos and colored stamps).
+const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This image is the FULL uncropped camera frame: an entire paper sheet sitting on a desk, with margins of desk visible around it. You must locate the physical sheet; the client will warp from your corners. Do not assume any prior crop.
 
 CRITICAL: Israeli official documents and bills have a horizontal tear-line or colored table header separating the bottom payment stub (containing a barcode and QR code) from the main letter. NEVER treat that internal horizontal line as the bottom edge of the paper. The true bottom edge (bottomLeft, bottomRight) is ALWAYS the outer physical boundary where the white paper meets the dark desk/background BELOW the bottom barcode and bottom-most text.
 
-corners must form a clean near-rectangular quadrilateral matching the outer paper sheet, never an acute/trapezoidal cut across the page. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR.
+paperCorners must form a clean near-rectangular quadrilateral matching the outer paper sheet from outer paper edge to outer paper edge, never an acute/trapezoidal cut across the page and never stopping at internal lines or tables. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR.
 
 Return JSON only, with:
-- corners: exactly 4 [x, y] points in 0..1000 of the PHOTO (not the desk). Order: [topLeft, topRight, bottomRight, bottomLeft]. Crop tight to the outer paper edges so there are zero desk slivers, but never crop away the payment stub or anything below an internal tear-line. x is horizontal, y is vertical.
+- paperCorners: exactly 4 [x, y] points in 0..1000 of the FULL PHOTO (desk included in that coordinate space). Order: [topLeft, topRight, bottomRight, bottomLeft]. Crop tight to the outer paper edges so there are zero desk slivers, but never crop away the payment stub or anything below an internal tear-line. x is horizontal, y is vertical.
 - rotation: 0 | 90 | 180 | 270 degrees clockwise needed so text is upright after the crop.
-- protectedBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of the PAPER SHEET after it is cropped to those corners (top-left of the sheet is 0,0). Include every embedded photograph (vehicle photos, portraits) and colored stamp. Empty array if none.
+- keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of the FULL PHOTO (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos, portraits), colored seal/logo, stamp, or delicate graphic that must keep natural tone/color. Empty array if none.
 - recipe: numeric instructions for a canvas flatten engine:
   - shadowStrength: "low" (even lighting), "medium", or "heavy" (strong side/bottom room shadows or a hand over the page).
   - whiteFloor: 205..235. Higher = more aggressive lift of off-white/yellow paper to #FFFFFF. Stay lower (~210) when Hebrew strokes are very thin so they are not erased.
@@ -22,7 +22,7 @@ Return JSON only, with:
 const RESPONSE_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    corners: {
+    paperCorners: {
       type: 'ARRAY',
       minItems: 4,
       maxItems: 4,
@@ -34,7 +34,7 @@ const RESPONSE_SCHEMA = {
       },
     },
     rotation: { type: 'INTEGER', enum: [0, 90, 180, 270] },
-    protectedBoxes: {
+    keepOriginalBoxes: {
       type: 'ARRAY',
       items: {
         type: 'ARRAY',
@@ -55,14 +55,14 @@ const RESPONSE_SCHEMA = {
     },
     qaNotes: { type: 'STRING' },
   },
-  required: ['corners', 'rotation', 'protectedBoxes', 'recipe', 'qaNotes'],
+  required: ['paperCorners', 'rotation', 'keepOriginalBoxes', 'recipe', 'qaNotes'],
 } as const
 
 export type AnalyzeScanBody =
   | {
-      corners: number[][]
+      paperCorners: number[][]
       rotation: 0 | 90 | 180 | 270
-      protectedBoxes: number[][]
+      keepOriginalBoxes: number[][]
       recipe: {
         shadowStrength: 'low' | 'medium' | 'heavy'
         whiteFloor: number
@@ -117,31 +117,38 @@ function normalizeCoordList(values: unknown[], size: number): number[] | null {
 function sanitizeDirector(raw: unknown): Exclude<AnalyzeScanBody, { error: string }> | null {
   if (!raw || typeof raw !== 'object') return null
   const record = raw as Record<string, unknown>
-  const cornerRows = Array.isArray(record.corners) ? record.corners : []
+  const cornerRows = Array.isArray(record.paperCorners)
+    ? record.paperCorners
+    : Array.isArray(record.corners)
+      ? record.corners
+      : []
   if (cornerRows.length !== 4) return null
-  const corners: number[][] = []
+  const paperCorners: number[][] = []
   for (const row of cornerRows) {
     const pair = Array.isArray(row) ? normalizeCoordList(row, 2) : null
     if (!pair) return null
-    corners.push(pair)
+    paperCorners.push(pair)
   }
   const rotationRaw = asNumber(record.rotation, 0)
   const rotation = ([0, 90, 180, 270] as const).includes(rotationRaw as 0 | 90 | 180 | 270)
     ? (rotationRaw as 0 | 90 | 180 | 270)
     : 0
-  const protectedBoxes: number[][] = []
-  if (Array.isArray(record.protectedBoxes)) {
-    for (const row of record.protectedBoxes) {
-      const box = Array.isArray(row) ? normalizeCoordList(row, 4) : null
-      if (box) protectedBoxes.push(box)
-    }
+  const keepOriginalBoxes: number[][] = []
+  const boxRows = Array.isArray(record.keepOriginalBoxes)
+    ? record.keepOriginalBoxes
+    : Array.isArray(record.protectedBoxes)
+      ? record.protectedBoxes
+      : []
+  for (const row of boxRows) {
+    const box = Array.isArray(row) ? normalizeCoordList(row, 4) : null
+    if (box) keepOriginalBoxes.push(box)
   }
   const recipeRaw = record.recipe && typeof record.recipe === 'object' ? (record.recipe as Record<string, unknown>) : {}
   const shadow = recipeRaw.shadowStrength === 'low' || recipeRaw.shadowStrength === 'heavy' ? recipeRaw.shadowStrength : 'medium'
   return {
-    corners,
+    paperCorners,
     rotation,
-    protectedBoxes,
+    keepOriginalBoxes,
     recipe: {
       shadowStrength: shadow,
       whiteFloor: clamp(asNumber(recipeRaw.whiteFloor, 218), 205, 235),

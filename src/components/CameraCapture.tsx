@@ -7,35 +7,8 @@ import {
   isIPad,
   primeCameraGesture,
 } from '../lib/camera'
-import { cornersFromUnit, detectDocumentCorners } from '../lib/detect'
 import { IMAGE_FILE_ACCEPT } from '../lib/image'
-import { clearLiveLock, peekLiveLock, rememberLiveLock } from '../lib/live-lock'
 import { useScan } from '../state/scan-context'
-import type { CaptureHint, Corners } from '../types'
-
-/** Live detection on a 200px canvas copy. Always reschedules so a throw cannot freeze the box. */
-const LIVE_INTERVAL_MS = 120
-const LIVE_TRACK = 0.2
-const LIVE_JUMP = 0.16
-const LIVE_MISS = 5
-
-type LiveQuad = { corners: Corners; width: number; height: number; at: number }
-
-function blend(from: Corners, to: Corners, amount: number): Corners {
-  const mix = (a: { x: number; y: number }, b: { x: number; y: number }) => ({
-    x: a.x + (b.x - a.x) * amount,
-    y: a.y + (b.y - a.y) * amount,
-  })
-  return { tl: mix(from.tl, to.tl), tr: mix(from.tr, to.tr), br: mix(from.br, to.br), bl: mix(from.bl, to.bl) }
-}
-
-function jumpSize(from: Corners, to: Corners, width: number, height: number) {
-  const dist = (a: { x: number; y: number }, b: { x: number; y: number }) =>
-    Math.hypot((a.x - b.x) / width, (a.y - b.y) / height)
-  return (
-    (dist(from.tl, to.tl) + dist(from.tr, to.tr) + dist(from.br, to.br) + dist(from.bl, to.bl)) / 4
-  )
-}
 
 type ImageCaptureInstance = {
   takePhoto: (settings?: { imageWidth?: number; imageHeight?: number }) => Promise<Blob>
@@ -71,84 +44,7 @@ export function CameraCapture() {
   const [ready, setReady] = useState(false)
   const [capturing, setCapturing] = useState(false)
   const streamRef = useRef<MediaStream | null>(null)
-  const [quad, setQuad] = useState<LiveQuad | null>(null)
   const [needsTap, setNeedsTap] = useState(false)
-  const quadRef = useRef<LiveQuad | null>(null)
-
-  useEffect(() => {
-    if (!ready) return
-    let stopped = false
-    let timer = 0
-    let frame = 0
-    let current: LiveQuad | null = null
-    let misses = 0
-    let spikes = 0
-
-    const clearBox = () => {
-      if (!current) return
-      current = null
-      quadRef.current = null
-      setQuad(null)
-      clearLiveLock()
-      misses = 0
-      spikes = 0
-    }
-
-    const tick = () => {
-      if (stopped) return
-      try {
-        const video = videoRef.current
-        if (video && video.videoWidth > 0 && video.readyState >= 2 && !document.hidden) {
-          const width = video.videoWidth
-          const height = video.videoHeight
-          const unit = detectDocumentCorners(video)
-          if (unit) {
-            const pixels = cornersFromUnit(unit, width, height)
-            const jumped =
-              current && current.width === width && jumpSize(current.corners, pixels, width, height) > LIVE_JUMP
-            if (jumped && spikes < 2) {
-              spikes += 1
-            } else {
-              spikes = 0
-              misses = 0
-              current = {
-                corners: current && current.width === width ? blend(current.corners, pixels, LIVE_TRACK) : pixels,
-                width,
-                height,
-                at: performance.now(),
-              }
-              quadRef.current = current
-              setQuad(current)
-              rememberLiveLock(unitHintFromLive(current, false))
-            }
-          } else {
-            misses += 1
-            if (misses >= LIVE_MISS) clearBox()
-          }
-        }
-      } catch (err) {
-        console.warn('Detection failed:', err)
-        clearBox()
-      } finally {
-        if (!stopped) {
-          timer = window.setTimeout(() => {
-            frame = requestAnimationFrame(tick)
-          }, LIVE_INTERVAL_MS)
-        }
-      }
-    }
-
-    timer = window.setTimeout(() => {
-      frame = requestAnimationFrame(tick)
-    }, LIVE_INTERVAL_MS)
-    return () => {
-      stopped = true
-      window.clearTimeout(timer)
-      cancelAnimationFrame(frame)
-      quadRef.current = null
-      setQuad(null)
-    }
-  }, [ready, facing])
 
   useEffect(() => {
     const video = videoRef.current
@@ -240,56 +136,22 @@ export function CameraCapture() {
     }
   }
 
-  function unitHintFromLive(live: LiveQuad, mirrored: boolean): CaptureHint {
-    const unit = (point: { x: number; y: number }) => ({
-      x: point.x / live.width,
-      y: point.y / live.height,
-    })
-    return {
-      corners: {
-        tl: unit(live.corners.tl),
-        tr: unit(live.corners.tr),
-        br: unit(live.corners.br),
-        bl: unit(live.corners.bl),
-      },
-      aspect: live.width / live.height,
-      mirrored,
-    }
-  }
-
-  /**
-   * Freeze the orange box as unit 0..1 of the video frame. Copied by value before the
-   * photo so crop-screen pins are exactly the lock the user saw.
-   */
-  function freezeLiveHint(mirrored: boolean): CaptureHint | undefined {
-    const live = quadRef.current
-    const hint = live && live.width > 0 && live.height > 0 ? unitHintFromLive(live, mirrored) : (peekLiveLock() ?? undefined)
-    if (hint) {
-      rememberLiveLock(hint)
-      console.log('Passing corners to crop screen:', hint.corners)
-    } else {
-      console.warn('Passing corners to crop screen:', null)
-    }
-    return hint
-  }
-
   async function capture() {
     if (capturing) return
     setCapturing(true)
-    const hint = freezeLiveHint(false)
     try {
       const photo = await takeSensorPhoto()
       if (photo && photo.size > 0) {
-        ingestBlob(photo, hint)
+        ingestBlob(photo)
         return
       }
-      captureFrame(facing === 'user' && hint ? { ...hint, mirrored: true } : hint)
+      captureFrame()
     } finally {
       setCapturing(false)
     }
   }
 
-  function captureFrame(hint?: CaptureHint) {
+  function captureFrame() {
     const video = videoRef.current
     if (!video || !video.videoWidth) return
     const width = video.videoWidth
@@ -308,7 +170,7 @@ export function CameraCapture() {
     context.drawImage(video, 0, 0, width, height)
     canvas.toBlob(
       (blob) => {
-        if (blob) ingestBlob(blob, hint)
+        if (blob) ingestBlob(blob)
       },
       'image/jpeg',
       0.95,
@@ -358,42 +220,20 @@ export function CameraCapture() {
         playsInline
       />
       <svg
-        viewBox={quad ? `0 0 ${quad.width} ${quad.height}` : '0 0 100 100'}
-        preserveAspectRatio="xMidYMid meet"
-        className={`pointer-events-none absolute inset-0 h-full w-full ${facing === 'user' ? '-scale-x-100' : ''}`}
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+        className="pointer-events-none absolute inset-[10%]"
         aria-hidden="true"
       >
-        {quad ? (
-          <>
-            <polygon
-              points={[quad.corners.tl, quad.corners.tr, quad.corners.br, quad.corners.bl]
-                .map((point) => `${point.x},${point.y}`)
-                .join(' ')}
-              fill="rgba(231,160,106,0.16)"
-              stroke="#e7a06a"
-              strokeWidth={3}
-              strokeLinejoin="round"
-              vectorEffect="non-scaling-stroke"
-            />
-            {[quad.corners.tl, quad.corners.tr, quad.corners.br, quad.corners.bl].map((point, index) => (
-              <circle key={index} cx={point.x} cy={point.y} r={quad.width * 0.012} fill="#fff" stroke="#e7a06a" strokeWidth={3} vectorEffect="non-scaling-stroke" />
-            ))}
-          </>
-        ) : (
-          <rect
-            x="12"
-            y="12"
-            width="76"
-            height="76"
-            rx="3"
-            fill="none"
-            stroke="rgba(255,255,255,0.55)"
-            strokeWidth={1.25}
-            strokeDasharray="6 6"
-            className="origin-center animate-pulse"
-            vectorEffect="non-scaling-stroke"
-          />
-        )}
+        <path
+          d="M 0 18 L 0 0 L 18 0 M 82 0 L 100 0 L 100 18 M 100 82 L 100 100 L 82 100 M 18 100 L 0 100 L 0 82"
+          fill="none"
+          stroke="rgba(255,255,255,0.78)"
+          strokeWidth={1.6}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          vectorEffect="non-scaling-stroke"
+        />
       </svg>
       <div className="absolute inset-x-0 top-0 flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))]">
         <button
@@ -404,14 +244,8 @@ export function CameraCapture() {
         >
           <X className="size-5" />
         </button>
-        <p className={`rounded-full bg-black/50 px-3 py-1 text-xs ${quad || !ready ? '' : 'animate-pulse'}`}>
-          {isIPad()
-            ? 'מצלמת האייפד'
-            : quad
-              ? 'מקם את הדף בתוך המסגרת'
-              : ready
-                ? 'מחפש מסמך...'
-                : 'פותח מצלמה...'}
+        <p className="rounded-full bg-black/50 px-3 py-1 text-center text-xs leading-4">
+          {isIPad() ? 'מצלמת האייפד' : ready ? 'מקם את הדף בשלמותו בתוך המסגרת' : 'פותח מצלמה...'}
         </p>
         <span className="size-11" />
       </div>

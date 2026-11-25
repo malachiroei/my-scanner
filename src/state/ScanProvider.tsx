@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { cornersFromUnit, detectDocumentCorners } from '../lib/detect'
-import { cornersValid, fullFrameCorners, mapLiveCorners } from '../lib/geometry'
+import { cornersValid, fullFrameCorners } from '../lib/geometry'
 import { isIPad, primeCameraGesture } from '../lib/camera'
-import { clearLiveLock, consumeLiveLock } from '../lib/live-lock'
+import { clearLiveLock } from '../lib/live-lock'
 import { isOpenCvReady, loadOpenCv } from '../lib/opencv'
 import {
   canvasToJpegBlob,
@@ -25,7 +25,6 @@ import {
   type ScanDirectorResult,
 } from '../lib/scan-director'
 import type {
-  CaptureHint,
   Corners,
   Draft,
   EngineStatus,
@@ -54,10 +53,19 @@ function filterLabel(filter: FilterMode) {
   return 'מנקה את העמוד…'
 }
 
-function processOptions(source: { recipe?: ScanRecipe; protectedBoxes?: ProtectedBox[] }) {
+function processOptions(source: {
+  recipe?: ScanRecipe
+  keepOriginalBoxes?: ProtectedBox[]
+  corners: Corners
+  width: number
+  height: number
+}) {
   return {
     recipe: source.recipe ?? DEFAULT_SCAN_RECIPE,
-    protectedBoxes: source.protectedBoxes ?? [],
+    keepOriginalBoxes: source.keepOriginalBoxes ?? [],
+    corners: source.corners,
+    sourceWidth: source.width,
+    sourceHeight: source.height,
   }
 }
 
@@ -256,7 +264,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     }, 50)
   }
 
-  /** Gallery / reset only. Camera capture already locked the live corners and must not re-detect. */
+  /** Offline fallback only. Camera capture stores the full uncropped frame and waits for Gemini. */
   async function locatePage(sourceUrl: string, width: number, height: number, gen: number) {
     const cancelled = () => gen !== detectGen.current || userAdjustedRef.current
     if (cancelled()) {
@@ -289,16 +297,12 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  async function applyDirectorToDraft(
-    draft: Draft,
-    director: ScanDirectorResult | null,
-    live: Corners | null,
-  ): Promise<Draft> {
+  async function applyDirectorToDraft(draft: Draft, director: ScanDirectorResult | null): Promise<Draft> {
     if (!director) {
       return {
         ...draft,
         director: 'fallback',
-        detecting: !draft.detected,
+        detecting: true,
         qaNotes: null,
       }
     }
@@ -307,12 +311,10 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     let sourceUrl = draft.sourceUrl
     let width = draft.width
     let height = draft.height
-    let corners = draft.corners
-    let boxes = director.protectedBoxes
+    let boxes = director.keepOriginalBoxes
     if (director.rotation !== 0) {
       const rotated = await rotateSourceImage(sourceUrl, director.rotation)
       if (rotated.url !== sourceUrl) URL.revokeObjectURL(sourceUrl)
-      corners = rotateCorners(corners, originW, originH, director.rotation)
       boxes = boxes.map((box) => rotateBox(box, director.rotation))
       sourceUrl = rotated.url
       width = rotated.width
@@ -329,18 +331,18 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       sourceUrl,
       width,
       height,
-      corners: useAi ? aiCorners : corners,
-      detected: Boolean(useAi || live || draft.detected),
-      detecting: !useAi && !live && !draft.detected,
+      corners: useAi ? aiCorners : fullFrameCorners(width, height),
+      detected: Boolean(useAi),
+      detecting: !useAi,
       snapToken: useAi ? draft.snapToken + 1 : draft.snapToken,
       recipe: director.recipe,
-      protectedBoxes: boxes,
+      keepOriginalBoxes: boxes,
       qaNotes: director.qaNotes || null,
       director: 'ready',
     }
   }
 
-  async function ingestBlob(blob: Blob, hint?: CaptureHint) {
+  async function ingestBlob(blob: Blob) {
     setScreen('prepare')
     setBusy('סוכן AI מנתח את המסמך...')
     await nextFrame()
@@ -348,23 +350,20 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     try {
       normalized = await normalizeImage(blob)
       const ingestToken = ++detectGen.current
-      const frozen = hint ?? consumeLiveLock()
-      if (hint) consumeLiveLock()
-      console.log('Passing corners to crop screen:', frozen?.corners ?? null)
-      const live = frozen ? mapLiveCorners(frozen, normalized.width, normalized.height) : null
+      clearLiveLock()
       userAdjustedRef.current = false
       let next: Draft = {
         sourceUrl: normalized.url,
         width: normalized.width,
         height: normalized.height,
-        corners: live ?? fullFrameCorners(normalized.width, normalized.height),
+        corners: fullFrameCorners(normalized.width, normalized.height),
         filter: 'magic',
-        detected: live !== null,
-        detecting: live === null,
+        detected: false,
+        detecting: true,
         snapToken: 0,
         editingId: null,
         recipe: DEFAULT_SCAN_RECIPE,
-        protectedBoxes: [],
+        keepOriginalBoxes: [],
         qaNotes: null,
         director: 'analyzing',
       }
@@ -374,7 +373,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
 
       const director = await analyzeCapturedScan(next.sourceUrl, next.width, next.height)
       if (ingestToken !== detectGen.current) return
-      next = await applyDirectorToDraft(next, director, live)
+      next = await applyDirectorToDraft(next, director)
       if (ingestToken !== detectGen.current) return
       draftRef.current = next
       setDraft(next)
@@ -484,10 +483,16 @@ export function ScanProvider({ children }: { children: ReactNode }) {
   }
 
   async function blobFor(
-    sourceUrl: string,
-    corners: Corners,
+    source: {
+      sourceUrl: string
+      corners: Corners
+      width: number
+      height: number
+      recipe?: ScanRecipe
+      keepOriginalBoxes?: ProtectedBox[]
+    },
     filter: FilterMode,
-    known: { warpUrl: string; magicUrl: string | null; recipe?: ScanRecipe; protectedBoxes?: ProtectedBox[] },
+    known: { warpUrl: string; magicUrl: string | null },
   ) {
     if (filter === 'original') {
       const response = await fetch(known.warpUrl)
@@ -499,11 +504,13 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       if (!response.ok) throw new Error('לא ניתן לקרוא את התמונה.')
       return response.blob()
     }
-    const key = pageKey(sourceUrl, corners, known.recipe)
-    const options = processOptions(known)
+    const key = pageKey(source.sourceUrl, source.corners, source.recipe)
+    const options = processOptions(source)
     let canvas = cachedWarp(key)
     if (!canvas) {
-      canvas = known.warpUrl ? await raster(known.warpUrl) : (await warpCanvasFor(sourceUrl, corners, known.recipe)).canvas
+      canvas = known.warpUrl
+        ? await raster(known.warpUrl)
+        : (await warpCanvasFor(source.sourceUrl, source.corners, source.recipe)).canvas
       storeWarp(key, canvas)
     }
     if (filter === 'magic') {
@@ -766,7 +773,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     if (!current || !shot) return null
     let resultUrl = current.filter === 'original' ? shot.warpUrl : shot.url
     if (current.filter === 'gray' || current.filter === 'bw' || (current.filter === 'magic' && !shot.magicUrl)) {
-      const blob = await blobFor(current.sourceUrl, current.corners, current.filter, shot)
+      const blob = await blobFor(current, current.filter, shot)
       resultUrl = URL.createObjectURL(blob)
     } else if (current.filter === 'magic' && shot.magicUrl) {
       resultUrl = shot.magicUrl
@@ -784,7 +791,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       resultWidth: shot.width,
       resultHeight: shot.height,
       recipe: current.recipe,
-      protectedBoxes: current.protectedBoxes,
+      keepOriginalBoxes: current.keepOriginalBoxes,
       qaNotes: current.qaNotes,
     }
   }
@@ -830,7 +837,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     }
     const endBusy = beginBusy('שומר תמונה…')
     try {
-      const blob = await blobFor(current.sourceUrl, current.corners, current.filter, shot)
+      const blob = await blobFor(current, current.filter, shot)
       const index = pagesRef.current.findIndex((page) => page.id === current.editingId)
       downloadBlob(blob, pageFileName(index >= 0 ? index : pagesRef.current.length))
     } catch (error) {
@@ -902,7 +909,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     }
     const endBusy = beginBusy(filterLabel(filter))
     try {
-      const blob = await blobFor(page.sourceUrl, page.corners, filter, page)
+      const blob = await blobFor(page, filter, page)
       const url = URL.createObjectURL(blob)
       const latest = pagesRef.current.find((item) => item.id === id)
       if (!latest || latest.filter !== filter) {
@@ -952,7 +959,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       snapToken: 0,
       editingId: page.id,
       recipe: page.recipe ?? DEFAULT_SCAN_RECIPE,
-      protectedBoxes: page.protectedBoxes ?? [],
+      keepOriginalBoxes: page.keepOriginalBoxes ?? [],
       qaNotes: page.qaNotes ?? null,
       director: page.qaNotes ? 'ready' : 'idle',
     })
@@ -965,7 +972,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     const page = list[index]
     if (!page || index < 0) return
     const endBusy = beginBusy('שומר תמונה…')
-    void blobFor(page.sourceUrl, page.corners, page.filter, page)
+    void blobFor(page, page.filter, page)
       .then((blob) => downloadBlob(blob, pageFileName(index)))
       .catch((error: unknown) => {
         console.error(error)
@@ -981,7 +988,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       for (let index = 0; index < list.length; index += 1) {
         const page = list[index]
         if (!page) continue
-        const blob = await blobFor(page.sourceUrl, page.corners, page.filter, page)
+        const blob = await blobFor(page, page.filter, page)
         downloadBlob(blob, pageFileName(index))
         await new Promise((resolve) => window.setTimeout(resolve, 280))
       }
@@ -1011,7 +1018,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
         ready.push({ ...page, resultUrl: page.magicUrl ?? page.resultUrl })
         continue
       }
-      const blob = await blobFor(page.sourceUrl, page.corners, page.filter, page)
+      const blob = await blobFor(page, page.filter, page)
       const url = URL.createObjectURL(blob)
       temps.push(url)
       ready.push({ ...page, resultUrl: url })
