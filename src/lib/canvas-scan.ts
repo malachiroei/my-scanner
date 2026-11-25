@@ -610,6 +610,80 @@ async function whiteBalanceRgb(
       data[i + 3] = 255
     }
   }
+  return { protect, sw, sh }
+}
+
+const INK_PULL_LUMA = 235
+const INK_PULL_SAT = 0.22
+const INK_PULL_GAMMA = 1.65
+const UNSHARP_AMOUNT = 0.35
+
+/** Post-flatten: pull gray ink darker. Paper, color, and photo blocks stay as they are. */
+async function darkenFaintInk(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  clock: { last: number },
+  paper: { protect: Float32Array; sw: number; sh: number },
+) {
+  const { protect, sw, sh } = paper
+  for (let y = 0; y < height; y += 1) {
+    if (y % 48 === 0) await yieldBusy(clock)
+    for (let x = 0; x < width; x += 1) {
+      const i = (y * width + x) * 4
+      const red = data[i] ?? 0
+      const green = data[i + 1] ?? 0
+      const blue = data[i + 2] ?? 0
+      const luma = pixelLuma(red, green, blue)
+      if (luma >= INK_PULL_LUMA) continue
+      if (pixelSat(red, green, blue) >= INK_PULL_SAT) continue
+      if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
+      const out = 255 * (luma / 255) ** INK_PULL_GAMMA
+      const lift = luma > 1 ? out / luma : 1
+      data[i] = clamp255(red * lift)
+      data[i + 1] = clamp255(green * lift)
+      data[i + 2] = clamp255(blue * lift)
+    }
+  }
+}
+
+/** Mild 3×3 unsharp on ink edges after the tone pull. Skips paper, color, and photos. */
+function unsharpInk(
+  image: ImageData,
+  paper: { protect: Float32Array; sw: number; sh: number },
+) {
+  const { data, width, height } = image
+  const { protect, sw, sh } = paper
+  const gray = new Float32Array(width * height)
+  for (let i = 0, p = 0; p < gray.length; p += 1, i += 4) {
+    gray[p] = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
+  }
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const p = y * width + x
+      const center = gray[p] ?? 0
+      if (center >= 240) continue
+      const i = p * 4
+      if (pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) >= INK_PULL_SAT) continue
+      if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
+      const blur =
+        ((gray[p - width - 1] ?? 0) +
+          (gray[p - width] ?? 0) +
+          (gray[p - width + 1] ?? 0) +
+          (gray[p - 1] ?? 0) +
+          center +
+          (gray[p + 1] ?? 0) +
+          (gray[p + width - 1] ?? 0) +
+          (gray[p + width] ?? 0) +
+          (gray[p + width + 1] ?? 0)) /
+        9
+      const sharp = clamp255(center + UNSHARP_AMOUNT * (center - blur))
+      const lift = center > 1 ? sharp / center : 1
+      data[i] = clamp255((data[i] ?? 0) * lift)
+      data[i + 1] = clamp255((data[i + 1] ?? 0) * lift)
+      data[i + 2] = clamp255((data[i + 2] ?? 0) * lift)
+    }
+  }
 }
 
 function clampPaperWhite(data: Uint8ClampedArray, width: number, height: number) {
@@ -1162,13 +1236,15 @@ function desaturatePixels(data: Uint8ClampedArray) {
 async function applyMagicColor(image: ImageData) {
   const { data, width, height } = image
   const clock = { last: performance.now() }
-  await whiteBalanceRgb(data, width, height, clock)
+  const paper = await whiteBalanceRgb(data, width, height, clock)
   clampPaperWhite(data, width, height)
   await applyScanTone(data, width, height, clock)
   await despeckle(data, width, height, clock)
   await despeckleGraySpots(data, width, height, clock)
   sharpenLuma(image)
   clampPaperWhite(data, width, height)
+  await darkenFaintInk(data, width, height, clock, paper)
+  unsharpInk(image, paper)
 }
 
 async function applyFastBlackWhite(image: ImageData) {
