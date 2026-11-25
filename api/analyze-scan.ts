@@ -4,8 +4,12 @@ const MAX_IMAGE_CHARS = 1_800_000
 
 const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. Inspect this photo of a paper document (often Hebrew forms, receipts, or Israeli traffic tickets with vehicle photos and colored stamps).
 
+CRITICAL: Israeli official documents and bills have a horizontal tear-line or colored table header separating the bottom payment stub (containing a barcode and QR code) from the main letter. NEVER treat that internal horizontal line as the bottom edge of the paper. The true bottom edge (bottomLeft, bottomRight) is ALWAYS the outer physical boundary where the white paper meets the dark desk/background BELOW the bottom barcode and bottom-most text.
+
+corners must form a clean near-rectangular quadrilateral matching the outer paper sheet, never an acute/trapezoidal cut across the page. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR.
+
 Return JSON only, with:
-- corners: exactly 4 [x, y] points in 0..1000 of the PHOTO (not the desk). Order: [topLeft, topRight, bottomRight, bottomLeft]. Crop tight to the paper so there are zero desk slivers or skewed margins. x is horizontal, y is vertical.
+- corners: exactly 4 [x, y] points in 0..1000 of the PHOTO (not the desk). Order: [topLeft, topRight, bottomRight, bottomLeft]. Crop tight to the outer paper edges so there are zero desk slivers, but never crop away the payment stub or anything below an internal tear-line. x is horizontal, y is vertical.
 - rotation: 0 | 90 | 180 | 270 degrees clockwise needed so text is upright after the crop.
 - protectedBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of the PAPER SHEET after it is cropped to those corners (top-left of the sheet is 0,0). Include every embedded photograph (vehicle photos, portraits) and colored stamp. Empty array if none.
 - recipe: numeric instructions for a canvas flatten engine:
@@ -200,6 +204,7 @@ export async function analyzeScan(input: unknown): Promise<AnalyzeScanResult> {
       ],
       generationConfig: {
         temperature: 0.2,
+        thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
       },

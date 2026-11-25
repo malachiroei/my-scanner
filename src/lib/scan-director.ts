@@ -10,7 +10,7 @@ export const DEFAULT_SCAN_RECIPE: ScanRecipe = {
 }
 
 export const ANALYZE_TIMEOUT_MS = 4000
-const PREVIEW_MAX_WIDTH = 1024
+const PREVIEW_MAX_WIDTH = 768
 
 export type ScanDirectorResult = {
   corners: Corners | null
@@ -39,7 +39,7 @@ export async function jpegPreviewBase64(sourceUrl: string, maxWidth = PREVIEW_MA
   const image = await loadImage(sourceUrl)
   const width = image.naturalWidth || image.width
   const height = image.naturalHeight || image.height
-  const scale = Math.min(1, maxWidth / Math.max(1, width))
+  const scale = Math.min(1, maxWidth / Math.max(1, width, height))
   const canvas = document.createElement('canvas')
   canvas.width = Math.max(1, Math.round(width * scale))
   canvas.height = Math.max(1, Math.round(height * scale))
@@ -48,7 +48,7 @@ export async function jpegPreviewBase64(sourceUrl: string, maxWidth = PREVIEW_MA
   context.imageSmoothingEnabled = true
   context.imageSmoothingQuality = 'high'
   context.drawImage(image, 0, 0, canvas.width, canvas.height)
-  const jpeg = await canvasToJpegBlob(canvas, 0.82)
+  const jpeg = await canvasToJpegBlob(canvas, 0.75)
   canvas.width = 0
   canvas.height = 0
   return blobToBase64(jpeg)
