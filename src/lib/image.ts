@@ -1,4 +1,4 @@
-const MAX_SOURCE_EDGE = 4000
+const MAX_SOURCE_EDGE = 4600
 const IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|heic|heif|heics)$/i
 const HEIC_EXT = /\.(heic|heif|heics)$/i
 const HEIC_BRAND = /^(heic|heix|heif|heis|heim|hevc|hevx|mif1|msf1)$/i

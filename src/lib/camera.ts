@@ -12,11 +12,11 @@ export function isIPad() {
   return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1
 }
 
-function desktopConstraints(facing: 'environment' | 'user'): MediaTrackConstraints {
+function highResConstraints(facing: 'environment' | 'user'): MediaTrackConstraints {
   return {
     facingMode: { ideal: facing },
-    width: { ideal: 1920 },
-    height: { ideal: 1080 },
+    width: { ideal: 4096 },
+    height: { ideal: 3072 },
   }
 }
 
@@ -35,7 +35,7 @@ async function pickBackCamera(stream: MediaStream, facing: 'environment' | 'user
     if (!back?.deviceId || back.deviceId === currentId) return stream
     const next = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { deviceId: { exact: back.deviceId } },
+      video: { deviceId: { exact: back.deviceId }, width: { ideal: 4096 }, height: { ideal: 3072 } },
     })
     stream.getTracks().forEach((track) => track.stop())
     return next
@@ -50,12 +50,13 @@ export async function acquireCameraStream(facing: 'environment' | 'user'): Promi
   }
   const attempts: MediaStreamConstraints[] = isIOS()
     ? [
+        { audio: false, video: highResConstraints(facing) },
         { audio: false, video: true },
         { audio: false, video: { facingMode: facing } },
         { audio: false, video: { facingMode: { ideal: facing } } },
       ]
     : [
-        { audio: false, video: desktopConstraints(facing) },
+        { audio: false, video: highResConstraints(facing) },
         { audio: false, video: { facingMode: facing } },
         { audio: false, video: true },
       ]

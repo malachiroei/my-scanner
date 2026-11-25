@@ -2,12 +2,14 @@
 import { distance, orderCorners } from './geometry'
 import { nextFrame } from './image'
 
-/** 125% of the 3234 page that looked right when the PDF was zoomed to 125%. */
-const WARP_LONG = 4042
+/** 125% of the 3234 page that looked right when the PDF was zoomed to 125%. At least 200 DPI A4. */
+const A4_LONG_MIN = 2339
+const A4_SHORT_MIN = 1654
+const WARP_LONG = Math.max(4042, A4_LONG_MIN)
 const WARP_SOURCE = 4600
 
 function a4Page(landscape: boolean): { width: number; height: number } {
-  const short = Math.round(WARP_LONG / Math.SQRT2)
+  const short = Math.max(A4_SHORT_MIN, Math.round(WARP_LONG / Math.SQRT2))
   return landscape ? { width: WARP_LONG, height: short } : { width: short, height: WARP_LONG }
 }
 
@@ -613,10 +615,11 @@ async function whiteBalanceRgb(
   return { protect, sw, sh }
 }
 
-const INK_PULL_LUMA = 235
+const INK_PULL_LUMA = 218
 const INK_PULL_SAT = 0.22
 const INK_PULL_GAMMA = 1.65
-const UNSHARP_AMOUNT = 0.35
+const PAPER_HAZE = 218
+const UNSHARP_AMOUNT = 0.65
 
 /** Post-flatten: pull gray ink darker. Paper, color, and photo blocks stay as they are. */
 async function darkenFaintInk(
@@ -662,7 +665,7 @@ function unsharpInk(
     for (let x = 1; x < width - 1; x += 1) {
       const p = y * width + x
       const center = gray[p] ?? 0
-      if (center >= 240) continue
+      if (center >= PAPER_HAZE) continue
       const i = p * 4
       if (pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) >= INK_PULL_SAT) continue
       if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
@@ -682,6 +685,30 @@ function unsharpInk(
       data[i] = clamp255((data[i] ?? 0) * lift)
       data[i + 1] = clamp255((data[i + 1] ?? 0) * lift)
       data[i + 2] = clamp255((data[i + 2] ?? 0) * lift)
+    }
+  }
+}
+
+/** Gray halos between letters → #FFFFFF. Photos and color stay untouched. */
+function whitenPaperHaze(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  paper: { protect: Float32Array; sw: number; sh: number },
+) {
+  const { protect, sw, sh } = paper
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = (y * width + x) * 4
+      const red = data[i] ?? 0
+      const green = data[i + 1] ?? 0
+      const blue = data[i + 2] ?? 0
+      if (pixelLuma(red, green, blue) < PAPER_HAZE) continue
+      if (pixelSat(red, green, blue) >= INK_PULL_SAT) continue
+      if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
+      data[i] = 255
+      data[i + 1] = 255
+      data[i + 2] = 255
     }
   }
 }
@@ -1245,6 +1272,7 @@ async function applyMagicColor(image: ImageData) {
   clampPaperWhite(data, width, height)
   await darkenFaintInk(data, width, height, clock, paper)
   unsharpInk(image, paper)
+  whitenPaperHaze(data, width, height, paper)
 }
 
 async function applyFastBlackWhite(image: ImageData) {
@@ -1270,6 +1298,19 @@ export function desaturateCanvas(canvas: HTMLCanvasElement): HTMLCanvasElement {
   return canvas
 }
 
+function whitenOuterBorder(source: HTMLCanvasElement) {
+  const context = source.getContext('2d')
+  if (!context) return source
+  const { width, height } = source
+  const inset = Math.max(8, Math.round(0.005 * Math.min(width, height)))
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, width, inset)
+  context.fillRect(0, height - inset, width, inset)
+  context.fillRect(0, 0, inset, height)
+  context.fillRect(width - inset, 0, inset, height)
+  return source
+}
+
 export async function straightenCanvas(
   image: CanvasImageSource,
   corners: Corners,
@@ -1278,7 +1319,7 @@ export async function straightenCanvas(
   const { width, height } = a4Page(isLandscape(corners))
   try {
     const warped = await warpCanvas(copy, corners, width, height)
-    return trimDarkMargins(trimToPaper(warped))
+    return whitenOuterBorder(trimDarkMargins(trimToPaper(warped)))
   } finally {
     copy.width = 0
     copy.height = 0

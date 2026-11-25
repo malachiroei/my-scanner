@@ -278,17 +278,12 @@ export function CameraCapture() {
     setCapturing(true)
     const hint = freezeLiveHint(false)
     try {
-      if (hint) {
-        // Same pixels as the orange box so crop pins cannot miss the lock.
-        captureFrame(facing === 'user' ? { ...hint, mirrored: true } : hint)
-        return
-      }
       const photo = await takeSensorPhoto()
       if (photo && photo.size > 0) {
-        ingestBlob(photo)
+        ingestBlob(photo, hint)
         return
       }
-      captureFrame()
+      captureFrame(facing === 'user' && hint ? { ...hint, mirrored: true } : hint)
     } finally {
       setCapturing(false)
     }
@@ -297,9 +292,8 @@ export function CameraCapture() {
   function captureFrame(hint?: CaptureHint) {
     const video = videoRef.current
     if (!video || !video.videoWidth) return
-    const scale = Math.min(1, 4000 / Math.max(video.videoWidth, video.videoHeight))
-    const width = Math.max(1, Math.round(video.videoWidth * scale))
-    const height = Math.max(1, Math.round(video.videoHeight * scale))
+    const width = video.videoWidth
+    const height = video.videoHeight
     const canvas = document.createElement('canvas')
     canvas.width = width
     canvas.height = height
