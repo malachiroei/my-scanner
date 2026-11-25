@@ -2,6 +2,22 @@ export type FilterMode = 'magic' | 'bw' | 'gray' | 'original'
 
 export type Point = { x: number; y: number }
 
+export type ShadowStrength = 'low' | 'medium' | 'heavy'
+
+export type PageRotation = 0 | 90 | 180 | 270
+
+/** Gemini box on the paper sheet: [ymin, xmin, ymax, xmax] in 0..1000. */
+export type ProtectedBox = [number, number, number, number]
+
+export type ScanRecipe = {
+  shadowStrength: ShadowStrength
+  whiteFloor: number
+  inkGamma: number
+  sharpen: number
+}
+
+export type ScanDirectorStatus = 'idle' | 'analyzing' | 'ready' | 'fallback'
+
 export type CornerKey = 'tl' | 'tr' | 'br' | 'bl'
 
 export type Corners = Record<CornerKey, Point>
@@ -20,6 +36,10 @@ export type Draft = {
   detecting: boolean
   snapToken: number
   editingId: string | null
+  recipe: ScanRecipe
+  protectedBoxes: ProtectedBox[]
+  qaNotes: string | null
+  director: ScanDirectorStatus
 }
 
 export type ScanPage = {
@@ -34,6 +54,9 @@ export type ScanPage = {
   magicUrl: string | null
   resultWidth: number
   resultHeight: number
+  recipe: ScanRecipe
+  protectedBoxes: ProtectedBox[]
+  qaNotes: string | null
 }
 
 export type PreviewImage = {

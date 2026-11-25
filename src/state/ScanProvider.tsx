@@ -16,7 +16,26 @@ import {
 import { cachedMagic, cachedWarp, clearPageCache, loadMagic, pageKey, storeWarp } from '../lib/page-cache'
 import { paintFastFilter, renderBlackWhite, renderMagic, straightenDocument } from '../lib/process'
 import { isChunkLoadError, reloadStaleChunk } from '../lib/pwa-install'
-import type { CaptureHint, Corners, Draft, EngineStatus, FilterMode, PreviewImage, ScanPage, Screen } from '../types'
+import {
+  analyzeCapturedScan,
+  DEFAULT_SCAN_RECIPE,
+  rotateBox,
+  rotateCorners,
+  rotateSourceImage,
+  type ScanDirectorResult,
+} from '../lib/scan-director'
+import type {
+  CaptureHint,
+  Corners,
+  Draft,
+  EngineStatus,
+  FilterMode,
+  PreviewImage,
+  ProtectedBox,
+  ScanPage,
+  ScanRecipe,
+  Screen,
+} from '../types'
 import { ScanContext } from './scan-context'
 
 function readTheme(): 'light' | 'dark' {
@@ -33,6 +52,13 @@ function filterLabel(filter: FilterMode) {
   if (filter === 'original') return 'מיישר את העמוד…'
   if (filter === 'gray') return 'ממיר לגווני אפור…'
   return 'מנקה את העמוד…'
+}
+
+function processOptions(source: { recipe?: ScanRecipe; protectedBoxes?: ProtectedBox[] }) {
+  return {
+    recipe: source.recipe ?? DEFAULT_SCAN_RECIPE,
+    protectedBoxes: source.protectedBoxes ?? [],
+  }
 }
 
 export function ScanProvider({ children }: { children: ReactNode }) {
@@ -263,36 +289,103 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  async function applyDirectorToDraft(
+    draft: Draft,
+    director: ScanDirectorResult | null,
+    live: Corners | null,
+  ): Promise<Draft> {
+    if (!director) {
+      return {
+        ...draft,
+        director: 'fallback',
+        detecting: !draft.detected,
+        qaNotes: null,
+      }
+    }
+    const originW = draft.width
+    const originH = draft.height
+    let sourceUrl = draft.sourceUrl
+    let width = draft.width
+    let height = draft.height
+    let corners = draft.corners
+    let boxes = director.protectedBoxes
+    if (director.rotation !== 0) {
+      const rotated = await rotateSourceImage(sourceUrl, director.rotation)
+      if (rotated.url !== sourceUrl) URL.revokeObjectURL(sourceUrl)
+      corners = rotateCorners(corners, originW, originH, director.rotation)
+      boxes = boxes.map((box) => rotateBox(box, director.rotation))
+      sourceUrl = rotated.url
+      width = rotated.width
+      height = rotated.height
+    }
+    const aiCorners = director.corners
+      ? director.rotation === 0
+        ? director.corners
+        : rotateCorners(director.corners, originW, originH, director.rotation)
+      : null
+    const useAi = !userAdjustedRef.current && aiCorners
+    return {
+      ...draft,
+      sourceUrl,
+      width,
+      height,
+      corners: useAi ? aiCorners : corners,
+      detected: Boolean(useAi || live || draft.detected),
+      detecting: !useAi && !live && !draft.detected,
+      snapToken: useAi ? draft.snapToken + 1 : draft.snapToken,
+      recipe: director.recipe,
+      protectedBoxes: boxes,
+      qaNotes: director.qaNotes || null,
+      director: 'ready',
+    }
+  }
+
   async function ingestBlob(blob: Blob, hint?: CaptureHint) {
     setScreen('prepare')
-    setBusy('מכין את התמונה…')
+    setBusy('סוכן AI מנתח את המסמך...')
     await nextFrame()
     let normalized: { url: string; width: number; height: number } | null = null
     try {
       normalized = await normalizeImage(blob)
-      detectGen.current += 1
+      const ingestToken = ++detectGen.current
       const frozen = hint ?? consumeLiveLock()
       if (hint) consumeLiveLock()
       console.log('Passing corners to crop screen:', frozen?.corners ?? null)
       const live = frozen ? mapLiveCorners(frozen, normalized.width, normalized.height) : null
-      userAdjustedRef.current = live !== null
-      const next = {
+      userAdjustedRef.current = false
+      let next: Draft = {
         sourceUrl: normalized.url,
         width: normalized.width,
         height: normalized.height,
         corners: live ?? fullFrameCorners(normalized.width, normalized.height),
-        filter: 'magic' as const,
+        filter: 'magic',
         detected: live !== null,
         detecting: live === null,
         snapToken: 0,
         editingId: null,
+        recipe: DEFAULT_SCAN_RECIPE,
+        protectedBoxes: [],
+        qaNotes: null,
+        director: 'analyzing',
       }
       draftRef.current = next
       processedKeyRef.current = null
       setDraft(next)
+
+      const director = await analyzeCapturedScan(next.sourceUrl, next.width, next.height)
+      if (ingestToken !== detectGen.current) return
+      next = await applyDirectorToDraft(next, director, live)
+      if (ingestToken !== detectGen.current) return
+      draftRef.current = next
+      setDraft(next)
       setBusy(null)
-      setScreen('corners')
-      if (!live) scheduleLocate(normalized.url, normalized.width, normalized.height)
+      if (next.detected) {
+        setScreen('preview')
+        void renderPreview(next)
+      } else {
+        setScreen('corners')
+        scheduleLocate(next.sourceUrl, next.width, next.height)
+      }
     } catch (error) {
       if (normalized) URL.revokeObjectURL(normalized.url)
       setToast(errorMessage(error))
@@ -379,8 +472,8 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     return canvas
   }
 
-  async function warpCanvasFor(sourceUrl: string, corners: Corners) {
-    const key = pageKey(sourceUrl, corners)
+  async function warpCanvasFor(sourceUrl: string, corners: Corners, recipe: ScanRecipe = DEFAULT_SCAN_RECIPE) {
+    const key = pageKey(sourceUrl, corners, recipe)
     const cached = cachedWarp(key)
     if (cached) return { key, canvas: cached }
     const image = await loadImage(sourceUrl)
@@ -394,7 +487,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     sourceUrl: string,
     corners: Corners,
     filter: FilterMode,
-    known: { warpUrl: string; magicUrl: string | null },
+    known: { warpUrl: string; magicUrl: string | null; recipe?: ScanRecipe; protectedBoxes?: ProtectedBox[] },
   ) {
     if (filter === 'original') {
       const response = await fetch(known.warpUrl)
@@ -406,26 +499,27 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       if (!response.ok) throw new Error('לא ניתן לקרוא את התמונה.')
       return response.blob()
     }
-    const key = pageKey(sourceUrl, corners)
+    const key = pageKey(sourceUrl, corners, known.recipe)
+    const options = processOptions(known)
     let canvas = cachedWarp(key)
     if (!canvas) {
-      canvas = known.warpUrl ? await raster(known.warpUrl) : (await warpCanvasFor(sourceUrl, corners)).canvas
+      canvas = known.warpUrl ? await raster(known.warpUrl) : (await warpCanvasFor(sourceUrl, corners, known.recipe)).canvas
       storeWarp(key, canvas)
     }
     if (filter === 'magic') {
-      const magic = cachedMagic(key) ?? (await loadMagic(key, () => renderMagic(canvas)))
+      const magic = cachedMagic(key) ?? (await loadMagic(key, () => renderMagic(canvas, options)))
       return canvasToJpegBlob(magic, 0.95)
     }
     if (filter === 'bw') {
       const bwKey = `${key}|bw`
-      const bw = cachedMagic(bwKey) ?? (await loadMagic(bwKey, () => renderBlackWhite(canvas)))
+      const bw = cachedMagic(bwKey) ?? (await loadMagic(bwKey, () => renderBlackWhite(canvas, options)))
       return canvasToJpegBlob(bw, 0.95)
     }
     return canvasToJpegBlob(paintFastFilter(canvas), 0.95)
   }
 
   async function renderPreview(source: Draft) {
-    const key = pageKey(source.sourceUrl, source.corners)
+    const key = pageKey(source.sourceUrl, source.corners, source.recipe)
     if (processingRef.current) return
     if (processedKeyRef.current === key && previewRef.current) return
     const token = ++requestRef.current
@@ -442,7 +536,7 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     try {
       await nextFrame()
       if (token !== requestRef.current) return
-      const warped = await warpCanvasFor(source.sourceUrl, source.corners)
+      const warped = await warpCanvasFor(source.sourceUrl, source.corners, source.recipe)
       if (token !== requestRef.current) return
       const warpBlob = await canvasToJpegBlob(warped.canvas, 0.95)
       if (token !== requestRef.current) return
@@ -485,12 +579,13 @@ export function ScanProvider({ children }: { children: ReactNode }) {
     try {
       await nextFrame()
       if (token !== requestRef.current) return
-      const key = pageKey(source.sourceUrl, source.corners)
+      const key = pageKey(source.sourceUrl, source.corners, source.recipe)
+      const options = processOptions(source)
       const warp = cachedWarp(key) ?? (await raster(shot.warpUrl))
       storeWarp(key, warp)
       if (token !== requestRef.current) return
       const cacheKey = kind === 'bw' ? `${key}|bw` : key
-      const produce = () => (kind === 'bw' ? renderBlackWhite(warp) : renderMagic(warp))
+      const produce = () => (kind === 'bw' ? renderBlackWhite(warp, options) : renderMagic(warp, options))
       const processed = cachedMagic(cacheKey) ?? (await loadMagic(cacheKey, produce))
       if (token !== requestRef.current) return
       const blob = await canvasToJpegBlob(processed, 0.95)
@@ -688,6 +783,9 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       magicUrl: shot.magicUrl ?? (current.filter === 'magic' ? resultUrl : null),
       resultWidth: shot.width,
       resultHeight: shot.height,
+      recipe: current.recipe,
+      protectedBoxes: current.protectedBoxes,
+      qaNotes: current.qaNotes,
     }
   }
 
@@ -853,6 +951,10 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       detecting: false,
       snapToken: 0,
       editingId: page.id,
+      recipe: page.recipe ?? DEFAULT_SCAN_RECIPE,
+      protectedBoxes: page.protectedBoxes ?? [],
+      qaNotes: page.qaNotes ?? null,
+      director: page.qaNotes ? 'ready' : 'idle',
     })
     setScreen('corners')
   }

@@ -1,4 +1,5 @@
-import type { Corners } from '../types'
+import type { Corners, ScanRecipe } from '../types'
+import { DEFAULT_SCAN_RECIPE } from './scan-director'
 
 type MagicJob = Promise<HTMLCanvasElement>
 
@@ -13,7 +14,7 @@ export function clearPageCache() {
   magicJobs.clear()
 }
 
-export function pageKey(sourceUrl: string, corners: Corners): string {
+export function pageKey(sourceUrl: string, corners: Corners, recipe: ScanRecipe = DEFAULT_SCAN_RECIPE): string {
   const n = (value: number) => Math.round(value)
   return [
     sourceUrl,
@@ -25,6 +26,10 @@ export function pageKey(sourceUrl: string, corners: Corners): string {
     n(corners.br.y),
     n(corners.bl.x),
     n(corners.bl.y),
+    recipe.shadowStrength,
+    n(recipe.whiteFloor),
+    n(recipe.inkGamma * 100),
+    n(recipe.sharpen * 100),
   ].join(':')
 }
 

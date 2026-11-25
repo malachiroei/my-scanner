@@ -3,6 +3,7 @@ import tailwindcss from '@tailwindcss/vite'
 import type { Plugin as RolldownPlugin } from 'rolldown'
 import react from '@vitejs/plugin-react'
 import { defineConfig, loadEnv, type Plugin } from 'vite'
+import { analyzeScan } from './api/analyze-scan.ts'
 import { sendScan } from './api/send-scan.ts'
 
 // jscanify is a UMD bundle: it has no ESM default export, and it reads a
@@ -68,6 +69,7 @@ function sendScanDevApi(): Plugin {
         const env = loadEnv(server.config.mode, server.config.root, '')
         if (env.RESEND_API_KEY) process.env.RESEND_API_KEY = env.RESEND_API_KEY
         if (env.RESEND_FROM) process.env.RESEND_FROM = env.RESEND_FROM
+        if (env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = env.GEMINI_API_KEY
         const chunks: Buffer[] = []
         req.on('data', (chunk: Buffer) => {
           chunks.push(chunk)
@@ -92,8 +94,50 @@ function sendScanDevApi(): Plugin {
   }
 }
 
+function analyzeScanDevApi(): Plugin {
+  return {
+    name: 'my-scanner-analyze-scan',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const path = req.url?.split('?')[0]
+        if (path !== '/api/analyze-scan') {
+          next()
+          return
+        }
+        if (req.method !== 'POST') {
+          res.statusCode = 405
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify({ error: 'Method not allowed' }))
+          return
+        }
+        const env = loadEnv(server.config.mode, server.config.root, '')
+        if (env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = env.GEMINI_API_KEY
+        const chunks: Buffer[] = []
+        req.on('data', (chunk: Buffer) => {
+          chunks.push(chunk)
+        })
+        req.on('end', () => {
+          void (async () => {
+            try {
+              const result = await analyzeScan(Buffer.concat(chunks).toString('utf8'))
+              res.statusCode = result.status
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify(result.body))
+            } catch (error) {
+              console.error(error)
+              res.statusCode = 500
+              res.setHeader('Content-Type', 'application/json')
+              res.end(JSON.stringify({ error: 'ניתוח המסמך נכשל.' }))
+            }
+          })()
+        })
+      })
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [sendScanDevApi(), jscanifyCvProxy(), react(), tailwindcss()],
+  plugins: [sendScanDevApi(), analyzeScanDevApi(), jscanifyCvProxy(), react(), tailwindcss()],
   optimizeDeps: {
     include: ['jscanify/client'],
     rolldownOptions: {

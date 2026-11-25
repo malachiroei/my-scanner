@@ -99,6 +99,14 @@ export function PreviewScreen() {
         className="pointer-events-auto relative z-50 shrink-0 touch-manipulation space-y-3 px-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
         style={{ position: 'relative', zIndex: 50, pointerEvents: 'auto', touchAction: 'manipulation' }}
       >
+        {draft.director === 'analyzing' ? (
+          <p className="flex items-center justify-center gap-2 text-center text-sm text-mist dark:text-paper/65">
+            <Spinner className="size-4" />
+            סוכן AI מנתח את המסמך...
+          </p>
+        ) : draft.qaNotes ? (
+          <p className="text-center text-sm text-mist dark:text-paper/65">{draft.qaNotes}</p>
+        ) : null}
         <FilterControls
           value={draft.filter}
           onChange={(filter) => {

@@ -5,6 +5,7 @@ import {
   desaturateCanvas,
   renderCanvasDocument,
   straightenCanvas,
+  type ScanProcessOptions,
 } from './canvas-scan'
 
 function yieldToBrowser(): Promise<void> {
@@ -17,8 +18,9 @@ async function renderWithCanvas(
   image: CanvasImageSource,
   corners: Corners,
   filter: FilterMode,
+  options?: ScanProcessOptions,
 ): Promise<{ canvas: HTMLCanvasElement; width: number; height: number }> {
-  const canvas = await renderCanvasDocument(image, corners, filter)
+  const canvas = await renderCanvasDocument(image, corners, filter, options)
   return { canvas, width: canvas.width, height: canvas.height }
 }
 
@@ -45,21 +47,28 @@ export function paintFastFilter(source: HTMLCanvasElement): HTMLCanvasElement {
 }
 
 /** Magic scan: continuous-tone color (flat-field, levels, unsharp). Yields to the UI while it runs. */
-export async function renderMagic(source: HTMLCanvasElement): Promise<HTMLCanvasElement> {
+export async function renderMagic(
+  source: HTMLCanvasElement,
+  options?: ScanProcessOptions,
+): Promise<HTMLCanvasElement> {
   await yieldToBrowser()
-  return await applyCanvasMagic(source)
+  return await applyCanvasMagic(source, options)
 }
 
 /** High-contrast grayscale of the same continuous-tone page. Yields to the UI while it runs. */
-export async function renderBlackWhite(source: HTMLCanvasElement): Promise<HTMLCanvasElement> {
+export async function renderBlackWhite(
+  source: HTMLCanvasElement,
+  options?: ScanProcessOptions,
+): Promise<HTMLCanvasElement> {
   await yieldToBrowser()
-  return await applyCanvasBlackWhite(source)
+  return await applyCanvasBlackWhite(source, options)
 }
 
 export async function renderDocument(
   image: CanvasImageSource,
   corners: Corners,
   filter: FilterMode,
+  options?: ScanProcessOptions,
 ): Promise<{ canvas: HTMLCanvasElement; width: number; height: number }> {
   try {
     const warped = await straightenDocument(image, corners)
@@ -68,10 +77,10 @@ export async function renderDocument(
       const canvas = paintFastFilter(warped)
       return { canvas, width: canvas.width, height: canvas.height }
     }
-    const canvas = filter === 'bw' ? await renderBlackWhite(warped) : await renderMagic(warped)
+    const canvas = filter === 'bw' ? await renderBlackWhite(warped, options) : await renderMagic(warped, options)
     return { canvas, width: canvas.width, height: canvas.height }
   } catch (error) {
     console.error(error)
   }
-  return renderWithCanvas(image, corners, filter)
+  return renderWithCanvas(image, corners, filter, options)
 }

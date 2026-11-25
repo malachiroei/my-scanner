@@ -1,6 +1,19 @@
-﻿import type { Corners, FilterMode, Point } from '../types'
+﻿import type { Corners, FilterMode, Point, ProtectedBox, ScanRecipe, ShadowStrength } from '../types'
 import { distance, orderCorners } from './geometry'
 import { nextFrame } from './image'
+import { DEFAULT_SCAN_RECIPE } from './scan-director'
+
+export type ScanProcessOptions = {
+  recipe?: ScanRecipe
+  protectedBoxes?: ProtectedBox[]
+}
+
+function tuneOf(options?: ScanProcessOptions) {
+  return {
+    recipe: options?.recipe ?? DEFAULT_SCAN_RECIPE,
+    protectedBoxes: options?.protectedBoxes ?? [],
+  }
+}
 
 /** 125% of the 3234 page that looked right when the PDF was zoomed to 125%. At least 200 DPI A4. */
 const A4_LONG_MIN = 2339
@@ -33,7 +46,6 @@ const PAPER_MIN_LUMA = 175
 const PAPER_LUMA = 240
 const SAT_BOOST = 1.08
 const SAT_MIN = 0.2
-const SHARPEN_AMOUNT = 1.08
 const SHARPEN_NOISE = 10
 const YIELD_MS = 24
 
@@ -557,21 +569,64 @@ async function estimatePaperRgb(
   return { fieldR, fieldG, fieldB, protect, sw, sh }
 }
 
-const MIN_BG = 140
-const ILLUM_W = 64
-const ILLUM_H = 90
-
-function sampleBgChannel(gray: Float32Array, sw: number, sh: number, x: number, y: number, width: number, height: number) {
-  return Math.max(MIN_BG, sampleField(gray, sw, sh, x, y, width, height))
+function illuminationGrid(strength: ShadowStrength, width: number, height: number) {
+  const portrait = height >= width
+  if (strength === 'heavy') {
+    const w = 48
+    const h = 68
+    return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 16, minBg: 125 }
+  }
+  if (strength === 'low') {
+    const w = 80
+    const h = 112
+    return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 8, minBg: 165 }
+  }
+  const w = 64
+  const h = 90
+  return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 12, minBg: 140 }
 }
 
-function inkSCurve(luma: number) {
-  if (luma >= 225) return 255
+function sampleBgChannel(
+  gray: Float32Array,
+  sw: number,
+  sh: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  minBg: number,
+) {
+  return Math.max(minBg, sampleField(gray, sw, sh, x, y, width, height))
+}
+
+function inkSCurve(luma: number, whiteFloor: number) {
+  if (luma >= whiteFloor) return 255
   if (luma <= 40) return luma * 0.85
   if (luma <= 160) return luma * 0.83
-  const t = (luma - 160) / (225 - 160)
+  const t = (luma - 160) / Math.max(1, whiteFloor - 160)
   const start = 160 * 0.83
   return start + t * (255 - start)
+}
+
+function markProtectedBoxes(
+  protect: Float32Array,
+  sw: number,
+  sh: number,
+  boxes: ProtectedBox[],
+) {
+  if (boxes.length === 0) return
+  for (let y = 0; y < sh; y += 1) {
+    const py = ((y + 0.5) / sh) * 1000
+    for (let x = 0; x < sw; x += 1) {
+      const px = ((x + 0.5) / sw) * 1000
+      for (const [ymin, xmin, ymax, xmax] of boxes) {
+        if (py >= ymin && py <= ymax && px >= xmin && px <= xmax) {
+          protect[y * sw + x] = 1
+          break
+        }
+      }
+    }
+  }
 }
 
 function emptyIllumination(sw: number, sh: number) {
@@ -588,15 +643,14 @@ function estimateIllumination(
   data: Uint8ClampedArray,
   width: number,
   height: number,
-): { fieldR: Float32Array; fieldG: Float32Array; fieldB: Float32Array; sw: number; sh: number } {
-  const portrait = height >= width
-  const sw = portrait ? ILLUM_W : ILLUM_H
-  const sh = portrait ? ILLUM_H : ILLUM_W
+  recipe: ScanRecipe,
+): { fieldR: Float32Array; fieldG: Float32Array; fieldB: Float32Array; sw: number; sh: number; minBg: number } {
+  const { sw, sh, blurPx, minBg } = illuminationGrid(recipe.shadowStrength, width, height)
   const tiny = document.createElement('canvas')
   tiny.width = sw
   tiny.height = sh
   const tinyCtx = tiny.getContext('2d', { willReadFrequently: true })
-  if (!tinyCtx) return emptyIllumination(sw, sh)
+  if (!tinyCtx) return { ...emptyIllumination(sw, sh), minBg }
 
   const down = tinyCtx.createImageData(sw, sh)
   const out = down.data
@@ -635,7 +689,7 @@ function estimateIllumination(
   blur.height = sh
   const blurCtx = blur.getContext('2d', { willReadFrequently: true })
   if (blurCtx) {
-    blurCtx.filter = 'blur(12px)'
+    blurCtx.filter = `blur(${blurPx}px)`
     blurCtx.drawImage(tiny, 0, 0)
     tinyCtx.drawImage(blur, 0, 0)
   }
@@ -645,15 +699,15 @@ function estimateIllumination(
   const fieldG = new Float32Array(sw * sh)
   const fieldB = new Float32Array(sw * sh)
   for (let p = 0, i = 0; p < fieldR.length; p += 1, i += 4) {
-    fieldR[p] = Math.max(MIN_BG, pixels[i] ?? MIN_BG)
-    fieldG[p] = Math.max(MIN_BG, pixels[i + 1] ?? MIN_BG)
-    fieldB[p] = Math.max(MIN_BG, pixels[i + 2] ?? MIN_BG)
+    fieldR[p] = Math.max(minBg, pixels[i] ?? minBg)
+    fieldG[p] = Math.max(minBg, pixels[i + 1] ?? minBg)
+    fieldB[p] = Math.max(minBg, pixels[i + 2] ?? minBg)
   }
   tiny.width = 0
   tiny.height = 0
   blur.width = 0
   blur.height = 0
-  return { fieldR, fieldG, fieldB, sw, sh }
+  return { fieldR, fieldG, fieldB, sw, sh, minBg }
 }
 
 /**
@@ -665,9 +719,12 @@ async function whiteBalanceRgb(
   width: number,
   height: number,
   clock: { last: number },
+  options?: ScanProcessOptions,
 ) {
+  const { recipe, protectedBoxes } = tuneOf(options)
   const { protect, sw: pw, sh: ph } = await estimatePaperRgb(data, width, height, clock)
-  const { fieldR, fieldG, fieldB, sw, sh } = estimateIllumination(data, width, height)
+  markProtectedBoxes(protect, pw, ph, protectedBoxes)
+  const { fieldR, fieldG, fieldB, sw, sh, minBg } = estimateIllumination(data, width, height, recipe)
   await yieldBusy(clock)
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
@@ -676,16 +733,16 @@ async function whiteBalanceRgb(
       const srcR = data[i] ?? 0
       const srcG = data[i + 1] ?? 0
       const srcB = data[i + 2] ?? 0
-      const bgR = sampleBgChannel(fieldR, sw, sh, x, y, width, height)
-      const bgG = sampleBgChannel(fieldG, sw, sh, x, y, width, height)
-      const bgB = sampleBgChannel(fieldB, sw, sh, x, y, width, height)
+      const bgR = sampleBgChannel(fieldR, sw, sh, x, y, width, height, minBg)
+      const bgG = sampleBgChannel(fieldG, sw, sh, x, y, width, height, minBg)
+      const bgB = sampleBgChannel(fieldB, sw, sh, x, y, width, height, minBg)
       let red = clamp255((srcR / bgR) * 255)
       let green = clamp255((srcG / bgG) * 255)
       let blue = clamp255((srcB / bgB) * 255)
       const sat = pixelSat(red, green, blue)
       const luma = pixelLuma(red, green, blue)
       if (sat < COLOR_SAT) {
-        const mapped = inkSCurve(luma)
+        const mapped = inkSCurve(luma, recipe.whiteFloor)
         if (mapped >= 255) {
           red = 255
           green = 255
@@ -708,9 +765,6 @@ async function whiteBalanceRgb(
 
 const INK_PULL_LUMA = 218
 const INK_PULL_SAT = 0.22
-const INK_PULL_GAMMA = 1.65
-const PAPER_HAZE = 218
-const UNSHARP_AMOUNT = 0.65
 
 /** Post-flatten: pull gray ink darker. Paper, color, and photo blocks stay as they are. */
 async function darkenFaintInk(
@@ -719,8 +773,10 @@ async function darkenFaintInk(
   height: number,
   clock: { last: number },
   paper: { protect: Float32Array; sw: number; sh: number },
+  recipe: ScanRecipe,
 ) {
   const { protect, sw, sh } = paper
+  const ceiling = Math.min(INK_PULL_LUMA, recipe.whiteFloor)
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
     for (let x = 0; x < width; x += 1) {
@@ -729,10 +785,10 @@ async function darkenFaintInk(
       const green = data[i + 1] ?? 0
       const blue = data[i + 2] ?? 0
       const luma = pixelLuma(red, green, blue)
-      if (luma >= INK_PULL_LUMA) continue
+      if (luma >= ceiling) continue
       if (pixelSat(red, green, blue) >= INK_PULL_SAT) continue
       if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
-      const out = 255 * (luma / 255) ** INK_PULL_GAMMA
+      const out = 255 * (luma / 255) ** recipe.inkGamma
       const lift = luma > 1 ? out / luma : 1
       data[i] = clamp255(red * lift)
       data[i + 1] = clamp255(green * lift)
@@ -745,6 +801,7 @@ async function darkenFaintInk(
 function unsharpInk(
   image: ImageData,
   paper: { protect: Float32Array; sw: number; sh: number },
+  recipe: ScanRecipe,
 ) {
   const { data, width, height } = image
   const { protect, sw, sh } = paper
@@ -756,7 +813,7 @@ function unsharpInk(
     for (let x = 1; x < width - 1; x += 1) {
       const p = y * width + x
       const center = gray[p] ?? 0
-      if (center >= PAPER_HAZE) continue
+      if (center >= recipe.whiteFloor) continue
       const i = p * 4
       if (pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) >= INK_PULL_SAT) continue
       if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
@@ -771,7 +828,7 @@ function unsharpInk(
           (gray[p + width] ?? 0) +
           (gray[p + width + 1] ?? 0)) /
         9
-      const sharp = clamp255(center + UNSHARP_AMOUNT * (center - blur))
+      const sharp = clamp255(center + recipe.sharpen * (center - blur))
       const lift = center > 1 ? sharp / center : 1
       data[i] = clamp255((data[i] ?? 0) * lift)
       data[i + 1] = clamp255((data[i + 1] ?? 0) * lift)
@@ -786,6 +843,7 @@ function whitenPaperHaze(
   width: number,
   height: number,
   paper: { protect: Float32Array; sw: number; sh: number },
+  recipe: ScanRecipe,
 ) {
   const { protect, sw, sh } = paper
   for (let y = 0; y < height; y += 1) {
@@ -794,7 +852,7 @@ function whitenPaperHaze(
       const red = data[i] ?? 0
       const green = data[i + 1] ?? 0
       const blue = data[i + 2] ?? 0
-      if (pixelLuma(red, green, blue) < PAPER_HAZE) continue
+      if (pixelLuma(red, green, blue) < recipe.whiteFloor) continue
       if (pixelSat(red, green, blue) >= INK_PULL_SAT) continue
       if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
       data[i] = 255
@@ -804,14 +862,15 @@ function whitenPaperHaze(
   }
 }
 
-function clampPaperWhite(data: Uint8ClampedArray, width: number, height: number) {
+function clampPaperWhite(data: Uint8ClampedArray, width: number, height: number, whiteFloor: number) {
   const n = width * height
+  const floor = Math.min(PAPER_LUMA, whiteFloor)
   for (let p = 0; p < n; p += 1) {
     const i = p * 4
     const red = data[i] ?? 0
     const green = data[i + 1] ?? 0
     const blue = data[i + 2] ?? 0
-    if (pixelLuma(red, green, blue) >= PAPER_LUMA && pixelSat(red, green, blue) < COLOR_SAT) {
+    if (pixelLuma(red, green, blue) >= floor && pixelSat(red, green, blue) < COLOR_SAT) {
       data[i] = 255
       data[i + 1] = 255
       data[i + 2] = 255
@@ -843,7 +902,7 @@ async function applyScanTone(
 }
 
 /** One mild unsharp after the tone curve. Triple-sharpening turned paper grain into sparkle. */
-function sharpenLuma(image: ImageData) {
+function sharpenLuma(image: ImageData, recipe: ScanRecipe) {
   const { data, width, height } = image
   const gray = new Float32Array(width * height)
   for (let i = 0, p = 0; p < gray.length; p += 1, i += 4) {
@@ -867,13 +926,13 @@ function sharpenLuma(image: ImageData) {
       const delta = center - blur
       const i = p * 4
       if (
-        center >= PAPER_LUMA ||
+        center >= recipe.whiteFloor ||
         Math.abs(delta) < SHARPEN_NOISE ||
         pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) > COLOR_SAT
       ) {
         continue
       }
-      const sharp = clamp255(center + SHARPEN_AMOUNT * delta)
+      const sharp = clamp255(center + recipe.sharpen * delta)
       const lift = center > 1 ? sharp / center : 1
       data[i] = clamp255((data[i] ?? 0) * lift)
       data[i + 1] = clamp255((data[i + 1] ?? 0) * lift)
@@ -1351,31 +1410,33 @@ function desaturatePixels(data: Uint8ClampedArray) {
   }
 }
 
-async function applyMagicColor(image: ImageData) {
+async function applyMagicColor(image: ImageData, options?: ScanProcessOptions) {
+  const { recipe } = tuneOf(options)
   const { data, width, height } = image
   const clock = { last: performance.now() }
-  const paper = await whiteBalanceRgb(data, width, height, clock)
-  clampPaperWhite(data, width, height)
+  const paper = await whiteBalanceRgb(data, width, height, clock, options)
+  clampPaperWhite(data, width, height, recipe.whiteFloor)
   await applyScanTone(data, width, height, clock)
   await despeckle(data, width, height, clock)
   await despeckleGraySpots(data, width, height, clock)
-  sharpenLuma(image)
-  clampPaperWhite(data, width, height)
-  await darkenFaintInk(data, width, height, clock, paper)
-  unsharpInk(image, paper)
-  whitenPaperHaze(data, width, height, paper)
+  sharpenLuma(image, recipe)
+  clampPaperWhite(data, width, height, recipe.whiteFloor)
+  await darkenFaintInk(data, width, height, clock, paper, recipe)
+  unsharpInk(image, paper, recipe)
+  whitenPaperHaze(data, width, height, paper, recipe)
 }
 
-async function applyFastBlackWhite(image: ImageData) {
+async function applyFastBlackWhite(image: ImageData, options?: ScanProcessOptions) {
+  const { recipe } = tuneOf(options)
   const { data, width, height } = image
   const clock = { last: performance.now() }
-  await whiteBalanceRgb(data, width, height, clock)
-  clampPaperWhite(data, width, height)
+  await whiteBalanceRgb(data, width, height, clock, options)
+  clampPaperWhite(data, width, height, recipe.whiteFloor)
   await applyScanTone(data, width, height, clock)
   await despeckle(data, width, height, clock)
   await despeckleGraySpots(data, width, height, clock)
-  sharpenLuma(image)
-  clampPaperWhite(data, width, height)
+  sharpenLuma(image, recipe)
+  clampPaperWhite(data, width, height, recipe.whiteFloor)
   desaturatePixels(data)
   await yieldBusy(clock)
 }
@@ -1435,25 +1496,32 @@ async function processPixels(
 }
 
 /** Magic Color: white paper, crisp text, continuous-tone photos. Never 1-bit, never a region mask. */
-export async function applyCanvasMagic(source: HTMLCanvasElement): Promise<HTMLCanvasElement> {
-  return processPixels(source, applyMagicColor)
+export async function applyCanvasMagic(
+  source: HTMLCanvasElement,
+  options?: ScanProcessOptions,
+): Promise<HTMLCanvasElement> {
+  return processPixels(source, (pixels) => applyMagicColor(pixels, options))
 }
 
 /** High-contrast grayscale of the same continuous-tone page (no binary threshold). */
-export async function applyCanvasBlackWhite(source: HTMLCanvasElement): Promise<HTMLCanvasElement> {
-  return processPixels(source, applyFastBlackWhite)
+export async function applyCanvasBlackWhite(
+  source: HTMLCanvasElement,
+  options?: ScanProcessOptions,
+): Promise<HTMLCanvasElement> {
+  return processPixels(source, (pixels) => applyFastBlackWhite(pixels, options))
 }
 
 export async function renderCanvasDocument(
   image: CanvasImageSource,
   corners: Corners,
   filter: FilterMode,
+  options?: ScanProcessOptions,
 ): Promise<HTMLCanvasElement> {
   const warped = await straightenCanvas(image, corners)
   if (filter === 'original') return warped
   if (filter === 'gray') return desaturateCanvas(copyCanvas(warped))
-  if (filter === 'magic') return applyCanvasMagic(warped)
-  return applyCanvasBlackWhite(warped)
+  if (filter === 'magic') return applyCanvasMagic(warped, options)
+  return applyCanvasBlackWhite(warped, options)
 }
 
 function copyCanvas(source: HTMLCanvasElement): HTMLCanvasElement {
