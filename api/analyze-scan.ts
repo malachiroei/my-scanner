@@ -2,13 +2,15 @@ const GEMINI_URL =
   'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
 const MAX_IMAGE_CHARS = 1_800_000
 
-const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This JPEG is the FULL uncropped camera frame: a white A4 sheet sitting on a desk, often with a calculator or other objects beside it. The client will perspective-warp from your paperCorners. You must locate the physical sheet.
+const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This JPEG is the FULL uncropped camera frame: a white A4 sheet sitting on a desk, often with a calculator, keyboard, or other objects beside it. The client will perspective-warp from your paperCorners. You must locate the physical sheet.
+
+Locate ALL FOUR outer physical edges of the white A4 paper (left, right, top, and bottom). paperCorners is [topLeft, topRight, bottomRight, bottomLeft] in 0..1000 of this FULL IMAGE. Cut away any keyboard, desk, wood, beige table, calculator, or background on the LEFT, RIGHT, TOP, and BOTTOM. Keep the entire paper sheet inside, including the top postal header and the bottom barcode. Never return the full camera frame [0,0]–[1000,1000] unless the paper truly fills every pixel.
 
 CRITICAL: Israeli official documents and bills have a horizontal tear-line or colored table header separating the bottom payment stub (barcode + QR) from the main letter. NEVER treat that internal line as the bottom edge of the paper. The true bottom edge (bottomLeft, bottomRight) is ALWAYS the outer physical boundary where the white paper meets the desk BELOW the bottom barcode and bottom-most text.
 
 IMPORTANT: The bottom 25% of Israeli bills/tickets is a colored or shaded payment stub ('הודעת זיכוי' / 'קבלה') ending with a barcode line at the very bottom, and the top 10% has a postal header/barcode. You MUST include BOTH the top postal header AND the entire bottom colored payment stub + bottom barcode inside paperCorners. Find the actual outer boundary where the white paper ends against the beige/wood desk table — NEVER stop at the border of the colored payment stub.
 
-paperCorners must hug the EXACT physical boundary where the white paper meets the darker desk — left, right, top, and bottom. Crop out the desk, calculator, and any surrounding objects completely. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR. Never cut across the page at internal lines or tables.
+paperCorners must hug the EXACT physical boundary where the white paper meets the darker desk — left, right, top, and bottom. Crop out the desk, keyboard, calculator, and any surrounding objects completely. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR. Never cut across the page at internal lines or tables.
 
 If the sheet is portrait A4, paperCorners MUST be a portrait quadrilateral (taller than it is wide) around the paper only. Never return the full landscape camera frame unless the paper truly fills the entire photo.
 
@@ -241,7 +243,7 @@ export const config = {
       sizeLimit: '2mb',
     },
   },
-  maxDuration: 10,
+  maxDuration: 15,
 }
 
 type ApiRequest = {

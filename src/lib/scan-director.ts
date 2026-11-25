@@ -1,4 +1,5 @@
-import { cornersValid, orderCorners } from './geometry'
+import { cornersFromUnit, detectPaperQuad } from './detect'
+import { cornersValid, inwardPageCorners, orderCorners } from './geometry'
 import { canvasToJpegBlob, loadImage } from './image'
 import type { Corners, PageRotation, Point, ProtectedBox, ScanRecipe } from '../types'
 
@@ -9,8 +10,9 @@ export const DEFAULT_SCAN_RECIPE: ScanRecipe = {
   sharpen: 0.35,
 }
 
-export const ANALYZE_TIMEOUT_MS = 4000
-const PREVIEW_MAX_WIDTH = 768
+export const ANALYZE_TIMEOUT_MS = 10_000
+const PREVIEW_MAX_EDGE = 640
+const PREVIEW_JPEG_QUALITY = 0.72
 
 export type ScanDirectorResult = {
   corners: Corners | null
@@ -33,11 +35,11 @@ async function blobToBase64(blob: Blob): Promise<string> {
   return btoa(binary)
 }
 
-export async function jpegPreviewBase64(sourceUrl: string, maxWidth = PREVIEW_MAX_WIDTH): Promise<string> {
+export async function jpegPreviewBase64(sourceUrl: string, maxEdge = PREVIEW_MAX_EDGE): Promise<string> {
   const image = await loadImage(sourceUrl)
   const width = image.naturalWidth || image.width
   const height = image.naturalHeight || image.height
-  const scale = Math.min(1, maxWidth / Math.max(1, width, height))
+  const scale = Math.min(1, maxEdge / Math.max(1, width, height))
   const canvas = document.createElement('canvas')
   canvas.width = Math.max(1, Math.round(width * scale))
   canvas.height = Math.max(1, Math.round(height * scale))
@@ -46,7 +48,7 @@ export async function jpegPreviewBase64(sourceUrl: string, maxWidth = PREVIEW_MA
   context.imageSmoothingEnabled = true
   context.imageSmoothingQuality = 'high'
   context.drawImage(image, 0, 0, canvas.width, canvas.height)
-  const jpeg = await canvasToJpegBlob(canvas, 0.75)
+  const jpeg = await canvasToJpegBlob(canvas, PREVIEW_JPEG_QUALITY)
   canvas.width = 0
   canvas.height = 0
   return blobToBase64(jpeg)
@@ -175,25 +177,68 @@ export function parseDirectorPayload(payload: unknown, width: number, height: nu
   }
 }
 
-/** 4-second timeout; returns null when offline, aborted, or the API is missing. */
+function analyzeErrorReason(error: unknown): string {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return `timeout after ${ANALYZE_TIMEOUT_MS}ms`
+  }
+  if (error instanceof Error) return `${error.name}: ${error.message}`
+  return String(error)
+}
+
+/** Local paper-edge crop when Gemini is missing, slow, or returns no corners. */
+export async function fallbackPaperCorners(sourceUrl: string, width: number, height: number): Promise<Corners> {
+  try {
+    const image = await loadImage(sourceUrl)
+    const unit = detectPaperQuad(image)
+    if (unit) {
+      const pixels = cornersFromUnit(unit, width, height)
+      if (cornersValid(pixels, width, height)) {
+        console.log('[scanner] detectPaperQuad fallback used')
+        return pixels
+      }
+    }
+    console.warn('[scanner] detectPaperQuad returned no valid quad')
+  } catch (error) {
+    console.error('[scanner] detectPaperQuad failed:', analyzeErrorReason(error), error)
+  }
+  return inwardPageCorners(width, height)
+}
+
+/** 10-second fetch timeout; returns null when offline, aborted, or the API is missing. */
 export async function analyzeCapturedScan(
   sourceUrl: string,
   width: number,
   height: number,
 ): Promise<ScanDirectorResult | null> {
+  let imageBase64: string
+  try {
+    imageBase64 = await jpegPreviewBase64(sourceUrl)
+  } catch (error) {
+    console.error('[scanner] analyze-scan preview encode failed:', analyzeErrorReason(error), error)
+    return null
+  }
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), ANALYZE_TIMEOUT_MS)
   try {
-    const imageBase64 = await jpegPreviewBase64(sourceUrl)
     const response = await fetch('/api/analyze-scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ imageBase64 }),
       signal: controller.signal,
     })
-    if (!response.ok) return null
-    return parseDirectorPayload(await response.json(), width, height)
-  } catch {
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      console.error(`[scanner] analyze-scan HTTP ${response.status}: ${body.slice(0, 240)}`)
+      return null
+    }
+    const parsed = parseDirectorPayload(await response.json(), width, height)
+    if (!parsed) {
+      console.error('[scanner] analyze-scan payload was not a valid director result')
+      return null
+    }
+    return parsed
+  } catch (error) {
+    console.error('[scanner] analyze-scan failed:', analyzeErrorReason(error), error)
     return null
   } finally {
     window.clearTimeout(timer)

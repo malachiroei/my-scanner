@@ -15,7 +15,12 @@ import {
 import { cachedMagic, cachedWarp, clearPageCache, loadMagic, pageKey, storeWarp } from '../lib/page-cache'
 import { paintFastFilter, renderBlackWhite, renderMagic, straightenDocument } from '../lib/process'
 import { isChunkLoadError, reloadStaleChunk } from '../lib/pwa-install'
-import { analyzeCapturedScan, DEFAULT_SCAN_RECIPE, type ScanDirectorResult } from '../lib/scan-director'
+import {
+  analyzeCapturedScan,
+  DEFAULT_SCAN_RECIPE,
+  fallbackPaperCorners,
+  type ScanDirectorResult,
+} from '../lib/scan-director'
 import type {
   Corners,
   Draft,
@@ -227,19 +232,20 @@ export function ScanProvider({ children }: { children: ReactNode }) {
 
   async function applyDirectorToDraft(draft: Draft, director: ScanDirectorResult | null): Promise<Draft> {
     if (!director) {
+      const corners = await fallbackPaperCorners(draft.sourceUrl, draft.width, draft.height)
       return {
         ...draft,
-        corners: fullFrameCorners(draft.width, draft.height),
+        corners,
         detected: true,
         detecting: false,
         director: 'fallback',
-        qaNotes: null,
+        qaNotes: 'העמוד זוהה מקומית.',
       }
     }
     const corners =
       director.corners && cornersValid(director.corners, draft.width, draft.height)
         ? director.corners
-        : fullFrameCorners(draft.width, draft.height)
+        : await fallbackPaperCorners(draft.sourceUrl, draft.width, draft.height)
     return {
       ...draft,
       corners,

@@ -441,3 +441,10 @@ export function detectDocumentCorners(
     return null
   }
 }
+
+/** Local paper-edge quad in unit 0..1 coords. Used when Gemini times out or fails. */
+export function detectPaperQuad(
+  source: HTMLVideoElement | HTMLCanvasElement | HTMLImageElement,
+): Corners | null {
+  return detectDocumentCorners(source)
+}
