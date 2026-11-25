@@ -15,7 +15,6 @@ const PREVIEW_MAX_WIDTH = 768
 export type ScanDirectorResult = {
   corners: Corners | null
   keepOriginalBoxes: ProtectedBox[]
-  recipe: ScanRecipe
   qaNotes: string
 }
 
@@ -160,18 +159,6 @@ export async function rotateSourceImage(
   return { url: URL.createObjectURL(jpeg), width: outWidth, height: outHeight }
 }
 
-function parseRecipe(raw: unknown): ScanRecipe {
-  const record = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
-  const shadow =
-    record.shadowStrength === 'low' || record.shadowStrength === 'heavy' ? record.shadowStrength : 'medium'
-  return {
-    shadowStrength: shadow,
-    whiteFloor: clamp(typeof record.whiteFloor === 'number' ? record.whiteFloor : 232, 232, 240),
-    inkGamma: clamp(typeof record.inkGamma === 'number' ? record.inkGamma : 1.22, 1.15, 1.3),
-    sharpen: clamp(typeof record.sharpen === 'number' ? record.sharpen : 0.35, 0.2, 0.5),
-  }
-}
-
 export function parseDirectorPayload(payload: unknown, width: number, height: number): ScanDirectorResult | null {
   if (!payload || typeof payload !== 'object' || 'error' in payload) return null
   const record = payload as Record<string, unknown>
@@ -184,7 +171,6 @@ export function parseDirectorPayload(payload: unknown, width: number, height: nu
   return {
     corners: cornersFromDirector(record.paperCorners ?? record.corners, width, height),
     keepOriginalBoxes: boxes,
-    recipe: parseRecipe(record.recipe),
     qaNotes: typeof record.qaNotes === 'string' && record.qaNotes.trim() ? record.qaNotes.trim().slice(0, 180) : '',
   }
 }

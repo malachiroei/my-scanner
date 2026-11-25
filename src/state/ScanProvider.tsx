@@ -245,7 +245,6 @@ export function ScanProvider({ children }: { children: ReactNode }) {
       corners,
       detected: true,
       detecting: false,
-      recipe: director.recipe,
       keepOriginalBoxes: director.keepOriginalBoxes,
       qaNotes: director.qaNotes || null,
       director: 'ready',

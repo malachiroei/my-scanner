@@ -9,14 +9,9 @@ CRITICAL: Israeli official documents and bills have a horizontal tear-line or co
 paperCorners must form a clean near-rectangular quadrilateral on the OUTER physical edges of the white A4 paper — from outer paper edge to outer paper edge. Crop out the desk, calculator, and any surrounding objects completely. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR. Never cut across the page at internal lines or tables.
 
 Return JSON only, with:
-- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. Frame the outer physical paper edges tightly. The client adds a small +8 unit safety buffer so the bottom barcode is never clipped. x is horizontal, y is vertical.
-- keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, QR code, or graphic box that must keep natural color and contrast and must NEVER be whitened. Pad each box generously by at least +20 units on all four sides. Empty array if none.
-- recipe: lighting/contrast for a canvas flatten engine that turns gray room shadows into pure #FFFFFF while preserving every thin stroke of small Hebrew text:
-  - shadowStrength: "low" (even lighting), "medium", or "heavy" (strong side/bottom shadows).
-  - whiteFloor: 232..240. Only lift true off-white paper background above 232 to #FFFFFF. Never go below 232 — that erases mid-gray thin Hebrew strokes.
-  - inkGamma: 1.15..1.30. Gentle darkening of faint text after illumination flatten. Keep closer to 1.2 when print is already solid.
-  - sharpen: 0.20..0.50. Lower on barcodes/dither to avoid white speckles.
-- qaNotes: one short Hebrew sentence (e.g. "זוהו 2 תמונות רכב מוגנות ותאורה אחידה").`
+- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. Frame the outer physical paper edges tightly. The client adds a +10 unit safety margin on the bottom edge so the barcode is never clipped, and a small side/top pad. x is horizontal, y is vertical.
+- keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, or graphic that must keep natural color. Pad each box generously by at least +20 units on all four sides. Empty array if none.
+- qaNotes: one short Hebrew sentence (e.g. "זוהו 2 תמונות רכב מוגנות").`
 
 const RESPONSE_SCHEMA = {
   type: 'OBJECT',
@@ -41,31 +36,15 @@ const RESPONSE_SCHEMA = {
         items: { type: 'NUMBER' },
       },
     },
-    recipe: {
-      type: 'OBJECT',
-      properties: {
-        shadowStrength: { type: 'STRING', enum: ['low', 'medium', 'heavy'] },
-        whiteFloor: { type: 'NUMBER' },
-        inkGamma: { type: 'NUMBER' },
-        sharpen: { type: 'NUMBER' },
-      },
-      required: ['shadowStrength', 'whiteFloor', 'inkGamma', 'sharpen'],
-    },
     qaNotes: { type: 'STRING' },
   },
-  required: ['paperCorners', 'keepOriginalBoxes', 'recipe', 'qaNotes'],
+  required: ['paperCorners', 'keepOriginalBoxes', 'qaNotes'],
 } as const
 
 export type AnalyzeScanBody =
   | {
       paperCorners: number[][]
       keepOriginalBoxes: number[][]
-      recipe: {
-        shadowStrength: 'low' | 'medium' | 'heavy'
-        whiteFloor: number
-        inkGamma: number
-        sharpen: number
-      }
       qaNotes: string
     }
   | { error: string }
@@ -135,18 +114,18 @@ function padPaperCorners(pairs: number[][]): number[][] {
   if (!tl || !br || !first || !second) return pairs
   const [tr, bl] = first.x - first.y > second.x - second.y ? [first, second] : [second, first]
   const pad = 8
+  const padBottom = 10
   return [
     [clamp(tl.x - pad, 0, 1000), clamp(tl.y - pad, 0, 1000)],
     [clamp(tr.x + pad, 0, 1000), clamp(tr.y - pad, 0, 1000)],
-    [clamp(br.x + pad, 0, 1000), clamp(br.y + pad, 0, 1000)],
-    [clamp(bl.x - pad, 0, 1000), clamp(bl.y + pad, 0, 1000)],
+    [clamp(br.x + pad, 0, 1000), clamp(br.y + padBottom, 0, 1000)],
+    [clamp(bl.x - pad, 0, 1000), clamp(bl.y + padBottom, 0, 1000)],
   ]
 }
 
 function sanitizeDirector(raw: unknown): Exclude<AnalyzeScanBody, { error: string }> | null {
   if (!raw || typeof raw !== 'object') return null
   const record = raw as Record<string, unknown>
-  if (!record.recipe || typeof record.recipe !== 'object') return null
   const cornerRows = Array.isArray(record.paperCorners)
     ? record.paperCorners
     : Array.isArray(record.corners)
@@ -177,17 +156,9 @@ function sanitizeDirector(raw: unknown): Exclude<AnalyzeScanBody, { error: strin
     const box = Array.isArray(row) ? normalizeCoordList(row, 4) : null
     if (box) keepOriginalBoxes.push(padBox(box))
   }
-  const recipeRaw = record.recipe as Record<string, unknown>
-  const shadow = recipeRaw.shadowStrength === 'low' || recipeRaw.shadowStrength === 'heavy' ? recipeRaw.shadowStrength : 'medium'
   return {
     paperCorners,
     keepOriginalBoxes,
-    recipe: {
-      shadowStrength: shadow,
-      whiteFloor: clamp(asNumber(recipeRaw.whiteFloor, 232), 232, 240),
-      inkGamma: clamp(asNumber(recipeRaw.inkGamma, 1.22), 1.15, 1.3),
-      sharpen: clamp(asNumber(recipeRaw.sharpen, 0.35), 0.2, 0.5),
-    },
     qaNotes: textValue(record.qaNotes).slice(0, 180) || 'המסמך נותח ומוכן לעיבוד.',
   }
 }

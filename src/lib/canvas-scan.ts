@@ -1,7 +1,6 @@
-﻿import type { Corners, FilterMode, Point, ProtectedBox, ScanRecipe, ShadowStrength } from '../types'
+﻿import type { Corners, FilterMode, Point, ProtectedBox, ScanRecipe } from '../types'
 import { distance, orderCorners } from './geometry'
 import { nextFrame } from './image'
-import { DEFAULT_SCAN_RECIPE } from './scan-director'
 
 export type ScanProcessOptions = {
   recipe?: ScanRecipe
@@ -9,29 +8,6 @@ export type ScanProcessOptions = {
   corners?: Corners
   sourceWidth?: number
   sourceHeight?: number
-}
-
-function paperWhiteFloor(whiteFloor: number) {
-  return Math.max(232, whiteFloor)
-}
-
-function gentleInkGamma(inkGamma: number) {
-  return Math.min(1.3, Math.max(1.15, inkGamma))
-}
-
-function tuneOf(options?: ScanProcessOptions) {
-  const recipe = options?.recipe ?? DEFAULT_SCAN_RECIPE
-  return {
-    recipe: {
-      ...recipe,
-      whiteFloor: paperWhiteFloor(recipe.whiteFloor),
-      inkGamma: gentleInkGamma(recipe.inkGamma),
-    },
-    keepOriginalBoxes: options?.keepOriginalBoxes ?? [],
-    corners: options?.corners,
-    sourceWidth: options?.sourceWidth,
-    sourceHeight: options?.sourceHeight,
-  }
 }
 
 /** 300 DPI A4 short edge, or the source paper crop when the sensor already has more pixels. */
@@ -55,18 +31,6 @@ function destPage(corners: Corners): { width: number; height: number } {
   return landscape ? { width: long, height: short } : { width: short, height: long }
 }
 
-/** Paper RGB divide only. No ink threshold — that erased Hebrew and photos. */
-const BG_DOWN = 8
-const BG_BLUR_RADIUS = 18
-const BG_BLUR_PASSES = 3
-const COLOR_SAT = 0.2
-const PHOTO_MID = 0.38
-const PAPER_MIN_LUMA = 175
-const PAPER_LUMA = 240
-const SAT_BOOST = 1.08
-const SAT_MIN = 0.2
-const SHARPEN_NOISE = 10
-const YIELD_MS = 24
 
 function sourceSize(image: CanvasImageSource): { width: number; height: number } {
   if (image instanceof HTMLImageElement) {
@@ -370,7 +334,12 @@ async function warpCanvas(
   return canvas
 }
 
-/* ---------- Scan: illumination ÷ → luma curve → saturation → unsharp. No region masks. ---------- */
+/* ---------- Magic Color: 90th-percentile white-point + gentle gamma. ---------- */
+
+const YIELD_MS = 24
+const PAPER_WHITE_MIN = 175
+const PAPER_WHITE_MAX = 245
+const PAPER_GAMMA = 1.18
 
 async function yieldBusy(clock: { last: number }) {
   if (performance.now() - clock.last < YIELD_MS) return
@@ -384,247 +353,6 @@ function clamp255(value: number) {
 
 function pixelLuma(r: number, g: number, b: number) {
   return 0.299 * r + 0.587 * g + 0.114 * b
-}
-
-function pixelSat(r: number, g: number, b: number) {
-  const max = Math.max(r, g, b)
-  const min = Math.min(r, g, b)
-  return max < 1 ? 0 : (max - min) / max
-}
-
-function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
-  const max = Math.max(r, g, b)
-  const min = Math.min(r, g, b)
-  const value = max / 255
-  const delta = max - min
-  const saturation = max < 1e-6 ? 0 : delta / max
-  if (delta < 1e-6) return [0, saturation, value]
-  let hue = 0
-  if (max === r) hue = ((g - b) / delta + (g < b ? 6 : 0)) / 6
-  else if (max === g) hue = ((b - r) / delta + 2) / 6
-  else hue = ((r - g) / delta + 4) / 6
-  return [hue, saturation, value]
-}
-
-function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
-  const sector = h * 6
-  const i = Math.floor(sector)
-  const f = sector - i
-  const p = v * (1 - s)
-  const q = v * (1 - f * s)
-  const t = v * (1 - (1 - f) * s)
-  switch (i % 6) {
-    case 0:
-      return [v * 255, t * 255, p * 255]
-    case 1:
-      return [q * 255, v * 255, p * 255]
-    case 2:
-      return [p * 255, v * 255, t * 255]
-    case 3:
-      return [p * 255, q * 255, v * 255]
-    case 4:
-      return [t * 255, p * 255, v * 255]
-    default:
-      return [v * 255, p * 255, q * 255]
-  }
-}
-
-function boostSat(r: number, g: number, b: number, sat: number): [number, number, number] {
-  const [hue, , value] = rgbToHsv(r, g, b)
-  return hsvToRgb(hue, Math.min(1, sat * SAT_BOOST), value)
-}
-
-function boxBlurAxis(
-  src: Float32Array,
-  dest: Float32Array,
-  length: number,
-  stride: number,
-  count: number,
-  step: number,
-  radius: number,
-) {
-  for (let line = 0; line < count; line += 1) {
-    const origin = line * step
-    let left = 0
-    let right = -1
-    let sum = 0
-    let n = 0
-    for (let i = 0; i < length; i += 1) {
-      const newRight = Math.min(length - 1, i + radius)
-      const newLeft = Math.max(0, i - radius)
-      while (right < newRight) {
-        right += 1
-        sum += src[origin + right * stride] ?? 0
-        n += 1
-      }
-      while (left < newLeft) {
-        sum -= src[origin + left * stride] ?? 0
-        n -= 1
-        left += 1
-      }
-      dest[origin + i * stride] = n > 0 ? sum / n : 1
-    }
-  }
-}
-
-function boxBlurGray(gray: Float32Array, width: number, height: number, radius: number) {
-  const temp = new Float32Array(width * height)
-  boxBlurAxis(gray, temp, width, 1, height, width, radius)
-  boxBlurAxis(temp, gray, height, width, width, 1, radius)
-  return gray
-}
-
-function sampleField(gray: Float32Array, sw: number, sh: number, x: number, y: number, width: number, height: number) {
-  const fx = ((x + 0.5) / width) * (sw - 1)
-  const fy = ((y + 0.5) / height) * (sh - 1)
-  const x0 = fx | 0
-  const y0 = fy | 0
-  const x1 = Math.min(sw - 1, x0 + 1)
-  const y1 = Math.min(sh - 1, y0 + 1)
-  const tx = fx - x0
-  const ty = fy - y0
-  const a = gray[y0 * sw + x0] ?? 0
-  const b = gray[y0 * sw + x1] ?? 0
-  const c = gray[y1 * sw + x0] ?? 0
-  const d = gray[y1 * sw + x1] ?? 0
-  return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty
-}
-
-/**
- * Local paper RGB (not luma). Yellow/green ambient light is captured per channel
- * so dividing by it removes the cast instead of scaling it up.
- */
-async function estimatePaperRgb(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  clock: { last: number },
-) {
-  const sw = Math.max(12, Math.round(width / BG_DOWN))
-  const sh = Math.max(12, Math.round(height / BG_DOWN))
-  const fieldR = new Float32Array(sw * sh)
-  const fieldG = new Float32Array(sw * sh)
-  const fieldB = new Float32Array(sw * sh)
-  const protect = new Float32Array(sw * sh)
-  let sumR = 0
-  let sumG = 0
-  let sumB = 0
-  let paperN = 0
-  for (let y = 0; y < sh; y += 1) {
-    const y0 = Math.floor((y * height) / sh)
-    const y1 = Math.max(y0 + 1, Math.floor(((y + 1) * height) / sh))
-    for (let x = 0; x < sw; x += 1) {
-      const x0 = Math.floor((x * width) / sw)
-      const x1 = Math.max(x0 + 1, Math.floor(((x + 1) * width) / sw))
-      let peakLuma = 0
-      let peakR = 0
-      let peakG = 0
-      let peakB = 0
-      let paperCount = 0
-      let midCount = 0
-      let count = 0
-      for (let yy = y0; yy < y1; yy += 1) {
-        const row = yy * width
-        for (let xx = x0; xx < x1; xx += 1) {
-          const i = (row + xx) * 4
-          const red = data[i] ?? 0
-          const green = data[i + 1] ?? 0
-          const blue = data[i + 2] ?? 0
-          const luma = pixelLuma(red, green, blue)
-          const sat = pixelSat(red, green, blue)
-          count += 1
-          if (sat < COLOR_SAT && luma >= PAPER_MIN_LUMA) {
-            paperCount += 1
-            if (red > peakR) peakR = red
-            if (green > peakG) peakG = green
-            if (blue > peakB) peakB = blue
-            if (luma > peakLuma) peakLuma = luma
-          }
-        }
-      }
-      for (let yy = y0; yy < y1; yy += 1) {
-        const row = yy * width
-        for (let xx = x0; xx < x1; xx += 1) {
-          const i = (row + xx) * 4
-          const luma = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
-          if (luma > 36 && luma < peakLuma * 0.85) midCount += 1
-        }
-      }
-      const id = y * sw + x
-      const midFrac = count > 0 ? midCount / count : 0
-      const paperFrac = count > 0 ? paperCount / count : 0
-      const isPhoto = midFrac > PHOTO_MID && paperFrac < 0.4
-      protect[id] = isPhoto ? 1 : 0
-      if (!isPhoto && paperCount > 0 && peakLuma >= PAPER_MIN_LUMA) {
-        fieldR[id] = peakR
-        fieldG[id] = peakG
-        fieldB[id] = peakB
-        sumR += peakR
-        sumG += peakG
-        sumB += peakB
-        paperN += 1
-      }
-    }
-    if (y % 4 === 0) await yieldBusy(clock)
-  }
-  const fallbackR = paperN > 0 ? sumR / paperN : 220
-  const fallbackG = paperN > 0 ? sumG / paperN : 220
-  const fallbackB = paperN > 0 ? sumB / paperN : 220
-  for (let i = 0; i < fieldR.length; i += 1) {
-    if ((fieldR[i] ?? 0) < 1) {
-      fieldR[i] = fallbackR
-      fieldG[i] = fallbackG
-      fieldB[i] = fallbackB
-    }
-  }
-  const radius = Math.max(2, Math.min(BG_BLUR_RADIUS, Math.floor(Math.min(sw, sh) / 2) - 1))
-  for (let pass = 0; pass < BG_BLUR_PASSES; pass += 1) {
-    boxBlurGray(fieldR, sw, sh, radius)
-    boxBlurGray(fieldG, sw, sh, radius)
-    boxBlurGray(fieldB, sw, sh, radius)
-    await yieldBusy(clock)
-  }
-  boxBlurGray(protect, sw, sh, 1)
-  return { fieldR, fieldG, fieldB, protect, sw, sh }
-}
-
-function illuminationGrid(strength: ShadowStrength, width: number, height: number) {
-  const portrait = height >= width
-  if (strength === 'heavy') {
-    const w = 48
-    const h = 68
-    return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 16, minBg: 145 }
-  }
-  if (strength === 'low') {
-    const w = 80
-    const h = 112
-    return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 8, minBg: 145 }
-  }
-  const w = 64
-  const h = 90
-  return { sw: portrait ? w : h, sh: portrait ? h : w, blurPx: 12, minBg: 145 }
-}
-
-function sampleBgChannel(
-  gray: Float32Array,
-  sw: number,
-  sh: number,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  minBg: number,
-) {
-  return Math.max(minBg, sampleField(gray, sw, sh, x, y, width, height))
-}
-
-function inkSCurve(luma: number, whiteFloor: number) {
-  if (luma >= whiteFloor) return 255
-  if (luma <= 40) return luma * 0.85
-  if (luma <= 160) return luma * 0.83
-  const t = (luma - 160) / Math.max(1, whiteFloor - 160)
-  const start = 160 * 0.83
-  return start + t * (255 - start)
 }
 
 function isFullFrameCorners(corners: Corners, width: number, height: number) {
@@ -645,21 +373,14 @@ function pointInKeepBox(nx: number, ny: number, boxes: ProtectedBox[]) {
   return false
 }
 
-/** keepOriginalBoxes are 0..1000 on the full uncropped photo; map dest cells back to that photo. */
-function markKeepOriginalBoxes(
-  protect: Float32Array,
-  sw: number,
-  sh: number,
-  destW: number,
-  destH: number,
-  options: ScanProcessOptions,
-) {
-  const boxes = options.keepOriginalBoxes ?? []
-  if (boxes.length === 0) return
-  const sourceW = options.sourceWidth ?? 0
-  const sourceH = options.sourceHeight ?? 0
-  const corners = options.corners
-  if (sourceW < 1 || sourceH < 1 || !corners) return
+/** keepOriginalBoxes are 0..1000 on the full uncropped photo; mark dest pixels that map into them. */
+function destKeepMask(destW: number, destH: number, options?: ScanProcessOptions): Uint8Array {
+  const mask = new Uint8Array(destW * destH)
+  const boxes = options?.keepOriginalBoxes ?? []
+  const sourceW = options?.sourceWidth ?? 0
+  const sourceH = options?.sourceHeight ?? 0
+  const corners = options?.corners
+  if (boxes.length === 0 || sourceW < 1 || sourceH < 1 || !corners) return mask
   const ordered = (() => {
     try {
       return orderCorners([corners.tl, corners.tr, corners.br, corners.bl])
@@ -676,518 +397,99 @@ function markKeepOriginalBoxes(
     ],
     [ordered.tl, ordered.tr, ordered.br, ordered.bl],
   )
-  if (!map) return
-  for (let y = 0; y < sh; y += 1) {
-    const destY = ((y + 0.5) / sh) * destH
-    for (let x = 0; x < sw; x += 1) {
-      const destX = ((x + 0.5) / sw) * destW
-      const source = mapHomography(map, destX, destY)
+  if (!map) return mask
+  const step = Math.max(1, Math.round(Math.min(destW, destH) / 900))
+  for (let y = 0; y < destH; y += step) {
+    for (let x = 0; x < destW; x += step) {
+      const source = mapHomography(map, x + 0.5, y + 0.5)
       const nx = (source.x / sourceW) * 1000
       const ny = (source.y / sourceH) * 1000
-      if (pointInKeepBox(nx, ny, boxes)) protect[y * sw + x] = 1
-    }
-  }
-}
-
-function emptyIllumination(sw: number, sh: number) {
-  const fieldR = new Float32Array(sw * sh)
-  const fieldG = new Float32Array(sw * sh)
-  const fieldB = new Float32Array(sw * sh)
-  fieldR.fill(220)
-  fieldG.fill(220)
-  fieldB.fill(220)
-  return { fieldR, fieldG, fieldB, sw, sh }
-}
-
-function estimateIllumination(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  recipe: ScanRecipe,
-): { fieldR: Float32Array; fieldG: Float32Array; fieldB: Float32Array; sw: number; sh: number; minBg: number } {
-  const { sw, sh, blurPx, minBg } = illuminationGrid(recipe.shadowStrength, width, height)
-  const tiny = document.createElement('canvas')
-  tiny.width = sw
-  tiny.height = sh
-  const tinyCtx = tiny.getContext('2d', { willReadFrequently: true })
-  if (!tinyCtx) return { ...emptyIllumination(sw, sh), minBg }
-
-  const down = tinyCtx.createImageData(sw, sh)
-  const out = down.data
-  for (let y = 0; y < sh; y += 1) {
-    const y0 = Math.floor((y * height) / sh)
-    const y1 = Math.max(y0 + 1, Math.floor(((y + 1) * height) / sh))
-    for (let x = 0; x < sw; x += 1) {
-      const x0 = Math.floor((x * width) / sw)
-      const x1 = Math.max(x0 + 1, Math.floor(((x + 1) * width) / sw))
-      let red = 0
-      let green = 0
-      let blue = 0
-      let n = 0
-      for (let yy = y0; yy < y1; yy += 1) {
-        const row = yy * width
-        for (let xx = x0; xx < x1; xx += 1) {
-          const i = (row + xx) * 4
-          red += data[i] ?? 0
-          green += data[i + 1] ?? 0
-          blue += data[i + 2] ?? 0
-          n += 1
-        }
+      if (!pointInKeepBox(nx, ny, boxes)) continue
+      const y1 = Math.min(destH, y + step)
+      const x1 = Math.min(destW, x + step)
+      for (let yy = y; yy < y1; yy += 1) {
+        const row = yy * destW
+        for (let xx = x; xx < x1; xx += 1) mask[row + xx] = 1
       }
-      const o = (y * sw + x) * 4
-      const inv = n > 0 ? 1 / n : 0
-      out[o] = red * inv
-      out[o + 1] = green * inv
-      out[o + 2] = blue * inv
-      out[o + 3] = 255
     }
   }
-  tinyCtx.putImageData(down, 0, 0)
-
-  const blur = document.createElement('canvas')
-  blur.width = sw
-  blur.height = sh
-  const blurCtx = blur.getContext('2d', { willReadFrequently: true })
-  if (blurCtx) {
-    blurCtx.filter = `blur(${blurPx}px)`
-    blurCtx.drawImage(tiny, 0, 0)
-    tinyCtx.drawImage(blur, 0, 0)
-  }
-
-  const pixels = tinyCtx.getImageData(0, 0, sw, sh).data
-  const fieldR = new Float32Array(sw * sh)
-  const fieldG = new Float32Array(sw * sh)
-  const fieldB = new Float32Array(sw * sh)
-  for (let p = 0, i = 0; p < fieldR.length; p += 1, i += 4) {
-    fieldR[p] = Math.max(minBg, pixels[i] ?? minBg)
-    fieldG[p] = Math.max(minBg, pixels[i + 1] ?? minBg)
-    fieldB[p] = Math.max(minBg, pixels[i + 2] ?? minBg)
-  }
-  tiny.width = 0
-  tiny.height = 0
-  blur.width = 0
-  blur.height = 0
-  return { fieldR, fieldG, fieldB, sw, sh, minBg }
+  return mask
 }
 
-/**
- * Large-radius illumination divide (CamScanner / Photoshop divide blend).
- * Tiny blurred lighting map, clamped so shadows and photos cannot darken the divisor.
- */
-async function whiteBalanceRgb(
+function paperWhitePercentile(
   data: Uint8ClampedArray,
   width: number,
   height: number,
-  clock: { last: number },
-  options?: ScanProcessOptions,
-) {
-  const { recipe, keepOriginalBoxes, corners, sourceWidth, sourceHeight } = tuneOf(options)
-  const { protect, sw: pw, sh: ph } = await estimatePaperRgb(data, width, height, clock)
-  markKeepOriginalBoxes(protect, pw, ph, width, height, {
-    keepOriginalBoxes,
-    corners,
-    sourceWidth,
-    sourceHeight,
-  })
-  const { fieldR, fieldG, fieldB, sw, sh, minBg } = estimateIllumination(data, width, height, recipe)
-  await yieldBusy(clock)
+  protect: Uint8Array,
+): number {
+  const hist = new Uint32Array(256)
+  let n = 0
+  const step = Math.max(1, Math.round(Math.min(width, height) / 400))
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      if (protect[y * width + x]) continue
+      const i = (y * width + x) * 4
+      const luma = Math.round(pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0))
+      hist[Math.max(0, Math.min(255, luma))] += 1
+      n += 1
+    }
+  }
+  if (n < 16) return 220
+  const target = n * 0.9
+  let acc = 0
+  for (let luma = 0; luma < 256; luma += 1) {
+    acc += hist[luma] ?? 0
+    if (acc >= target) {
+      return Math.min(PAPER_WHITE_MAX, Math.max(PAPER_WHITE_MIN, luma))
+    }
+  }
+  return 220
+}
+
+function stretchChannel(value: number, scale: number) {
+  const lifted = Math.min(255, value * scale)
+  return clamp255(Math.pow(lifted / 255, PAPER_GAMMA) * 255)
+}
+
+async function applyWhitePointLevels(image: ImageData, options?: ScanProcessOptions) {
+  const { data, width, height } = image
+  const clock = { last: performance.now() }
+  const protect = destKeepMask(width, height, options)
+  const paperWhite = paperWhitePercentile(data, width, height, protect)
+  const scale = 255 / Math.max(1, paperWhite)
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
+    const row = y * width
     for (let x = 0; x < width; x += 1) {
-      const i = (y * width + x) * 4
-      const srcR = data[i] ?? 0
-      const srcG = data[i + 1] ?? 0
-      const srcB = data[i + 2] ?? 0
-      const bgR = sampleBgChannel(fieldR, sw, sh, x, y, width, height, minBg)
-      const bgG = sampleBgChannel(fieldG, sw, sh, x, y, width, height, minBg)
-      const bgB = sampleBgChannel(fieldB, sw, sh, x, y, width, height, minBg)
-      let red = clamp255((srcR / bgR) * 255)
-      let green = clamp255((srcG / bgG) * 255)
-      let blue = clamp255((srcB / bgB) * 255)
-      const kept = sampleField(protect, pw, ph, x, y, width, height) > 0.35
-      if (kept) {
-        data[i] = srcR
-        data[i + 1] = srcG
-        data[i + 2] = srcB
-        data[i + 3] = 255
-        continue
-      }
-      const sat = pixelSat(red, green, blue)
-      const luma = pixelLuma(red, green, blue)
-      if (sat < COLOR_SAT) {
-        const mapped = inkSCurve(luma, recipe.whiteFloor)
-        if (mapped >= 255) {
-          red = 255
-          green = 255
-          blue = 255
-        } else if (luma > 1) {
-          const lift = mapped / luma
-          red = clamp255(red * lift)
-          green = clamp255(green * lift)
-          blue = clamp255(blue * lift)
-        }
-      }
-      data[i] = red
-      data[i + 1] = green
-      data[i + 2] = blue
+      if (protect[row + x]) continue
+      const i = (row + x) * 4
+      data[i] = stretchChannel(data[i] ?? 0, scale)
+      data[i + 1] = stretchChannel(data[i + 1] ?? 0, scale)
+      data[i + 2] = stretchChannel(data[i + 2] ?? 0, scale)
       data[i + 3] = 255
     }
   }
-  return { protect, sw: pw, sh: ph }
 }
 
-const INK_PULL_LUMA = 218
-const INK_PULL_SAT = 0.22
-
-/** Post-flatten: pull gray ink darker. Paper, color, and photo blocks stay as they are. */
-async function darkenFaintInk(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  clock: { last: number },
-  paper: { protect: Float32Array; sw: number; sh: number },
-  recipe: ScanRecipe,
-) {
-  const { protect, sw, sh } = paper
-  const ceiling = Math.min(INK_PULL_LUMA, recipe.whiteFloor)
-  for (let y = 0; y < height; y += 1) {
-    if (y % 48 === 0) await yieldBusy(clock)
-    for (let x = 0; x < width; x += 1) {
-      const i = (y * width + x) * 4
-      const red = data[i] ?? 0
-      const green = data[i + 1] ?? 0
-      const blue = data[i + 2] ?? 0
-      const luma = pixelLuma(red, green, blue)
-      if (luma >= ceiling) continue
-      if (pixelSat(red, green, blue) >= INK_PULL_SAT) continue
-      if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
-      const out = 255 * (luma / 255) ** recipe.inkGamma
-      const lift = luma > 1 ? out / luma : 1
-      data[i] = clamp255(red * lift)
-      data[i + 1] = clamp255(green * lift)
-      data[i + 2] = clamp255(blue * lift)
-    }
+function desaturatePixels(data: Uint8ClampedArray) {
+  for (let i = 0; i < data.length; i += 4) {
+    const tone = Math.round(pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0))
+    data[i] = tone
+    data[i + 1] = tone
+    data[i + 2] = tone
   }
 }
 
-/** Mild 3×3 unsharp on ink edges after the tone pull. Skips paper, color, and photos. */
-function unsharpInk(
-  image: ImageData,
-  paper: { protect: Float32Array; sw: number; sh: number },
-  recipe: ScanRecipe,
-) {
-  const { data, width, height } = image
-  const { protect, sw, sh } = paper
-  const gray = new Float32Array(width * height)
-  for (let i = 0, p = 0; p < gray.length; p += 1, i += 4) {
-    gray[p] = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
-  }
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
-      const p = y * width + x
-      const center = gray[p] ?? 0
-      if (center >= recipe.whiteFloor) continue
-      const i = p * 4
-      if (pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) >= INK_PULL_SAT) continue
-      if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
-      const blur =
-        ((gray[p - width - 1] ?? 0) +
-          (gray[p - width] ?? 0) +
-          (gray[p - width + 1] ?? 0) +
-          (gray[p - 1] ?? 0) +
-          center +
-          (gray[p + 1] ?? 0) +
-          (gray[p + width - 1] ?? 0) +
-          (gray[p + width] ?? 0) +
-          (gray[p + width + 1] ?? 0)) /
-        9
-      const sharp = clamp255(center + recipe.sharpen * (center - blur))
-      const lift = center > 1 ? sharp / center : 1
-      data[i] = clamp255((data[i] ?? 0) * lift)
-      data[i + 1] = clamp255((data[i + 1] ?? 0) * lift)
-      data[i + 2] = clamp255((data[i + 2] ?? 0) * lift)
-    }
-  }
+async function applyMagicColor(image: ImageData, options?: ScanProcessOptions) {
+  await applyWhitePointLevels(image, options)
 }
 
-/** Gray halos between letters → #FFFFFF. Photos and color stay untouched. */
-function whitenPaperHaze(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  paper: { protect: Float32Array; sw: number; sh: number },
-  recipe: ScanRecipe,
-) {
-  const { protect, sw, sh } = paper
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const i = (y * width + x) * 4
-      const red = data[i] ?? 0
-      const green = data[i + 1] ?? 0
-      const blue = data[i + 2] ?? 0
-      if (pixelLuma(red, green, blue) < recipe.whiteFloor) continue
-      if (pixelSat(red, green, blue) >= INK_PULL_SAT) continue
-      if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
-      data[i] = 255
-      data[i + 1] = 255
-      data[i + 2] = 255
-    }
-  }
+async function applyFastBlackWhite(image: ImageData, options?: ScanProcessOptions) {
+  await applyWhitePointLevels(image, options)
+  desaturatePixels(image.data)
 }
 
-function clampPaperWhite(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  whiteFloor: number,
-  paper?: { protect: Float32Array; sw: number; sh: number },
-) {
-  const n = width * height
-  const floor = Math.max(232, Math.min(PAPER_LUMA, whiteFloor))
-  for (let p = 0; p < n; p += 1) {
-    const i = p * 4
-    const x = p % width
-    const y = (p / width) | 0
-    if (paper && sampleField(paper.protect, paper.sw, paper.sh, x, y, width, height) > 0.35) continue
-    const red = data[i] ?? 0
-    const green = data[i + 1] ?? 0
-    const blue = data[i + 2] ?? 0
-    if (pixelLuma(red, green, blue) >= floor && pixelSat(red, green, blue) < COLOR_SAT) {
-      data[i] = 255
-      data[i + 1] = 255
-      data[i + 2] = 255
-    }
-  }
-}
 
-/** Mild 1.1× saturation on color only. No second luma curve — that posterized photos and ate fine print. */
-async function applyScanTone(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  clock: { last: number },
-) {
-  const count = width * height
-  for (let p = 0; p < count; p += 1) {
-    if (p % (width * 32) === 0) await yieldBusy(clock)
-    const i = p * 4
-    const red = data[i] ?? 0
-    const green = data[i + 1] ?? 0
-    const blue = data[i + 2] ?? 0
-    const sat = pixelSat(red, green, blue)
-    const out = sat > SAT_MIN ? boostSat(red, green, blue, sat) : [red, green, blue]
-    data[i] = clamp255(out[0])
-    data[i + 1] = clamp255(out[1])
-    data[i + 2] = clamp255(out[2])
-    data[i + 3] = 255
-  }
-}
-
-/** One mild unsharp after the tone curve. Triple-sharpening turned paper grain into sparkle. */
-function sharpenLuma(
-  image: ImageData,
-  recipe: ScanRecipe,
-  paper?: { protect: Float32Array; sw: number; sh: number },
-) {
-  const { data, width, height } = image
-  const gray = new Float32Array(width * height)
-  for (let i = 0, p = 0; p < gray.length; p += 1, i += 4) {
-    gray[p] = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
-  }
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
-      if (paper && sampleField(paper.protect, paper.sw, paper.sh, x, y, width, height) > 0.35) continue
-      const p = y * width + x
-      const center = gray[p] ?? 0
-      const blur =
-        ((gray[p - width - 1] ?? 0) +
-          (gray[p - width] ?? 0) +
-          (gray[p - width + 1] ?? 0) +
-          (gray[p - 1] ?? 0) +
-          center +
-          (gray[p + 1] ?? 0) +
-          (gray[p + width - 1] ?? 0) +
-          (gray[p + width] ?? 0) +
-          (gray[p + width + 1] ?? 0)) /
-        9
-      const delta = center - blur
-      const i = p * 4
-      if (
-        center >= recipe.whiteFloor ||
-        Math.abs(delta) < SHARPEN_NOISE ||
-        pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) > COLOR_SAT
-      ) {
-        continue
-      }
-      const sharp = clamp255(center + recipe.sharpen * delta)
-      const lift = center > 1 ? sharp / center : 1
-      data[i] = clamp255((data[i] ?? 0) * lift)
-      data[i + 1] = clamp255((data[i + 1] ?? 0) * lift)
-      data[i + 2] = clamp255((data[i + 2] ?? 0) * lift)
-    }
-  }
-}
-
-/** Isolated dark specks (dust / sensor noise), not strokes of letters or barcode modules. */
-async function despeckle(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  clock: { last: number },
-) {
-  const n = width * height
-  const gray = new Uint8Array(n)
-  for (let p = 0, i = 0; p < n; p += 1, i += 4) {
-    gray[p] = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) | 0
-  }
-  const seen = new Uint8Array(n)
-  const stack = new Int32Array(n)
-  const cells = new Int32Array(4)
-  const yieldEvery = Math.max(width * 20, 1)
-  for (let start = 0; start < n; start += 1) {
-    if (start % yieldEvery === 0) await yieldBusy(clock)
-    if (seen[start] || (gray[start] ?? 255) >= 128) continue
-    const si = start * 4
-    if (pixelSat(data[si] ?? 0, data[si + 1] ?? 0, data[si + 2] ?? 0) > COLOR_SAT) continue
-    let top = 0
-    stack[0] = start
-    top = 1
-    seen[start] = 1
-    let count = 0
-    let minX = width
-    let minY = height
-    let maxX = 0
-    let maxY = 0
-    while (top > 0) {
-      top -= 1
-      const index = stack[top] ?? 0
-      if (count < 4) cells[count] = index
-      count += 1
-      const x = index % width
-      const y = (index - x) / width
-      if (x < minX) minX = x
-      if (y < minY) minY = y
-      if (x > maxX) maxX = x
-      if (y > maxY) maxY = y
-      if (x > 0) {
-        const next = index - 1
-        if (!seen[next] && (gray[next] ?? 255) < 128) {
-          seen[next] = 1
-          stack[top] = next
-          top += 1
-        }
-      }
-      if (x + 1 < width) {
-        const next = index + 1
-        if (!seen[next] && (gray[next] ?? 255) < 128) {
-          seen[next] = 1
-          stack[top] = next
-          top += 1
-        }
-      }
-      if (y > 0) {
-        const next = index - width
-        if (!seen[next] && (gray[next] ?? 255) < 128) {
-          seen[next] = 1
-          stack[top] = next
-          top += 1
-        }
-      }
-      if (y + 1 < height) {
-        const next = index + width
-        if (!seen[next] && (gray[next] ?? 255) < 128) {
-          seen[next] = 1
-          stack[top] = next
-          top += 1
-        }
-      }
-    }
-    if (count > 3 || maxX - minX > 1 || maxY - minY > 1) continue
-    for (let c = 0; c < count; c += 1) {
-      const i = (cells[c] ?? 0) * 4
-      data[i] = 255
-      data[i + 1] = 255
-      data[i + 2] = 255
-    }
-  }
-}
-
-/** Mid-gray blotches sitting on white paper — not letter strokes or punctuation. */
-async function despeckleGraySpots(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  clock: { last: number },
-) {
-  const n = width * height
-  const gray = new Uint8Array(n)
-  for (let p = 0, i = 0; p < n; p += 1, i += 4) {
-    gray[p] = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) | 0
-  }
-  const seen = new Uint8Array(n)
-  const stack = new Int32Array(n)
-  const cells = new Int32Array(48)
-  const yieldEvery = Math.max(width * 20, 1)
-  const isSpot = (tone: number) => tone >= 110 && tone < 240
-  for (let start = 0; start < n; start += 1) {
-    if (start % yieldEvery === 0) await yieldBusy(clock)
-    if (seen[start] || !isSpot(gray[start] ?? 255)) continue
-    const si = start * 4
-    if (pixelSat(data[si] ?? 0, data[si + 1] ?? 0, data[si + 2] ?? 0) > COLOR_SAT) continue
-    let top = 0
-    stack[0] = start
-    top = 1
-    seen[start] = 1
-    let count = 0
-    let minX = width
-    let minY = height
-    let maxX = 0
-    let maxY = 0
-    let paperEdge = 0
-    let edge = 0
-    while (top > 0) {
-      top -= 1
-      const index = stack[top] ?? 0
-      if (count < 48) cells[count] = index
-      count += 1
-      const x = index % width
-      const y = (index - x) / width
-      if (x < minX) minX = x
-      if (y < minY) minY = y
-      if (x > maxX) maxX = x
-      if (y > maxY) maxY = y
-      const look = (ok: boolean, next: number) => {
-        if (!ok) {
-          edge += 1
-          return
-        }
-        const tone = gray[next] ?? 255
-        if (isSpot(tone)) {
-          if (!seen[next]) {
-            seen[next] = 1
-            stack[top] = next
-            top += 1
-          }
-          return
-        }
-        edge += 1
-        if (tone >= 240) paperEdge += 1
-      }
-      look(x > 0, index - 1)
-      look(x + 1 < width, index + 1)
-      look(y > 0, index - width)
-      look(y + 1 < height, index + width)
-    }
-    if (count > 40 || maxX - minX > 8 || maxY - minY > 8) continue
-    if (edge < 4 || paperEdge < edge * 0.65) continue
-    for (let c = 0; c < count; c += 1) {
-      const i = (cells[c] ?? 0) * 4
-      data[i] = 255
-      data[i + 1] = 255
-      data[i + 2] = 255
-    }
-  }
-}
 
 function cropCanvas(source: HTMLCanvasElement, left: number, top: number, right: number, bottom: number) {
   const cropW = right - left
@@ -1488,46 +790,6 @@ function trimDarkMargins(source: HTMLCanvasElement): HTMLCanvasElement {
   return cropCanvas(source, left, top, right, bottom)
 }
 
-function desaturatePixels(data: Uint8ClampedArray) {
-  for (let i = 0; i < data.length; i += 4) {
-    const tone = Math.round(pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0))
-    data[i] = tone
-    data[i + 1] = tone
-    data[i + 2] = tone
-  }
-}
-
-async function applyMagicColor(image: ImageData, options?: ScanProcessOptions) {
-  const { recipe } = tuneOf(options)
-  const { data, width, height } = image
-  const clock = { last: performance.now() }
-  const paper = await whiteBalanceRgb(data, width, height, clock, options)
-  clampPaperWhite(data, width, height, recipe.whiteFloor, paper)
-  await applyScanTone(data, width, height, clock)
-  await despeckle(data, width, height, clock)
-  await despeckleGraySpots(data, width, height, clock)
-  sharpenLuma(image, recipe, paper)
-  clampPaperWhite(data, width, height, recipe.whiteFloor, paper)
-  await darkenFaintInk(data, width, height, clock, paper, recipe)
-  unsharpInk(image, paper, recipe)
-  whitenPaperHaze(data, width, height, paper, recipe)
-}
-
-async function applyFastBlackWhite(image: ImageData, options?: ScanProcessOptions) {
-  const { recipe } = tuneOf(options)
-  const { data, width, height } = image
-  const clock = { last: performance.now() }
-  const paper = await whiteBalanceRgb(data, width, height, clock, options)
-  clampPaperWhite(data, width, height, recipe.whiteFloor, paper)
-  await applyScanTone(data, width, height, clock)
-  await despeckle(data, width, height, clock)
-  await despeckleGraySpots(data, width, height, clock)
-  sharpenLuma(image, recipe, paper)
-  clampPaperWhite(data, width, height, recipe.whiteFloor, paper)
-  desaturatePixels(data)
-  await yieldBusy(clock)
-}
-
 export function desaturateCanvas(canvas: HTMLCanvasElement): HTMLCanvasElement {
   const context = canvas.getContext('2d', { willReadFrequently: true })
   if (!context) return canvas
@@ -1584,7 +846,7 @@ async function processPixels(
   return canvas
 }
 
-/** Magic Color: white paper, crisp text, continuous-tone photos. Never 1-bit, never a region mask. */
+/** Magic Color: Original-fidelity text on a clean white page. Photos in keepOriginalBoxes stay untouched. */
 export async function applyCanvasMagic(
   source: HTMLCanvasElement,
   options?: ScanProcessOptions,

@@ -46,7 +46,7 @@ export function paintFastFilter(source: HTMLCanvasElement): HTMLCanvasElement {
   return canvas
 }
 
-/** Magic scan: continuous-tone color (flat-field, levels, unsharp). Yields to the UI while it runs. */
+/** Magic scan: white-point stretch to clean paper, photos left untouched. */
 export async function renderMagic(
   source: HTMLCanvasElement,
   options?: ScanProcessOptions,
