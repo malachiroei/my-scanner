@@ -13,8 +13,6 @@ export const ANALYZE_TIMEOUT_MS = 4000
 const PREVIEW_MAX_WIDTH = 768
 
 export type ScanDirectorResult = {
-  corners: Corners | null
-  rotation: PageRotation
   keepOriginalBoxes: ProtectedBox[]
   recipe: ScanRecipe
   qaNotes: string
@@ -73,7 +71,12 @@ function asBox(value: unknown): ProtectedBox | null {
   const ymax = clamp(nums[2] * scale, 0, 1000)
   const xmax = clamp(nums[3] * scale, 0, 1000)
   if (ymax - ymin < 8 || xmax - xmin < 8) return null
-  return [Math.min(ymin, ymax), Math.min(xmin, xmax), Math.max(ymin, ymax), Math.max(xmin, xmax)]
+  return [
+    clamp(Math.min(ymin, ymax), 0, 1000),
+    clamp(Math.min(xmin, xmax), 0, 1000),
+    clamp(Math.max(ymin, ymax), 0, 1000),
+    clamp(Math.max(xmin, xmax), 0, 1000),
+  ]
 }
 
 export function cornersFromDirector(raw: unknown, width: number, height: number): Corners | null {
@@ -168,11 +171,9 @@ function parseRecipe(raw: unknown): ScanRecipe {
   }
 }
 
-export function parseDirectorPayload(payload: unknown, width: number, height: number): ScanDirectorResult | null {
+export function parseDirectorPayload(payload: unknown): ScanDirectorResult | null {
   if (!payload || typeof payload !== 'object' || 'error' in payload) return null
   const record = payload as Record<string, unknown>
-  const rotationRaw = typeof record.rotation === 'number' ? record.rotation : 0
-  const rotation: PageRotation = rotationRaw === 90 || rotationRaw === 180 || rotationRaw === 270 ? rotationRaw : 0
   const boxRows = Array.isArray(record.keepOriginalBoxes)
     ? record.keepOriginalBoxes
     : Array.isArray(record.protectedBoxes)
@@ -180,8 +181,6 @@ export function parseDirectorPayload(payload: unknown, width: number, height: nu
       : []
   const boxes = boxRows.map(asBox).filter((box): box is ProtectedBox => box !== null)
   return {
-    corners: cornersFromDirector(record.paperCorners ?? record.corners, width, height),
-    rotation,
     keepOriginalBoxes: boxes,
     recipe: parseRecipe(record.recipe),
     qaNotes: typeof record.qaNotes === 'string' && record.qaNotes.trim() ? record.qaNotes.trim().slice(0, 180) : '',
@@ -189,7 +188,7 @@ export function parseDirectorPayload(payload: unknown, width: number, height: nu
 }
 
 /** 4-second timeout; returns null when offline, aborted, or the API is missing. */
-export async function analyzeCapturedScan(sourceUrl: string, width: number, height: number): Promise<ScanDirectorResult | null> {
+export async function analyzeCapturedScan(sourceUrl: string): Promise<ScanDirectorResult | null> {
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), ANALYZE_TIMEOUT_MS)
   try {
@@ -201,7 +200,7 @@ export async function analyzeCapturedScan(sourceUrl: string, width: number, heig
       signal: controller.signal,
     })
     if (!response.ok) return null
-    return parseDirectorPayload(await response.json(), width, height)
+    return parseDirectorPayload(await response.json())
   } catch {
     return null
   } finally {

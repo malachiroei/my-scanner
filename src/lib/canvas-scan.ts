@@ -614,6 +614,17 @@ function inkSCurve(luma: number, whiteFloor: number) {
   return start + t * (255 - start)
 }
 
+function isFullFrameCorners(corners: Corners, width: number, height: number) {
+  const xs = [corners.tl.x, corners.tr.x, corners.br.x, corners.bl.x]
+  const ys = [corners.tl.y, corners.tr.y, corners.br.y, corners.bl.y]
+  return (
+    Math.min(...xs) <= width * 0.02 &&
+    Math.max(...xs) >= width * 0.98 &&
+    Math.min(...ys) <= height * 0.02 &&
+    Math.max(...ys) >= height * 0.98
+  )
+}
+
 function pointInKeepBox(nx: number, ny: number, boxes: ProtectedBox[]) {
   for (const [ymin, xmin, ymax, xmax] of boxes) {
     if (ny >= ymin && ny <= ymax && nx >= xmin && nx <= xmax) return true
@@ -780,10 +791,17 @@ async function whiteBalanceRgb(
       let red = clamp255((srcR / bgR) * 255)
       let green = clamp255((srcG / bgG) * 255)
       let blue = clamp255((srcB / bgB) * 255)
+      const kept = sampleField(protect, pw, ph, x, y, width, height) > 0.35
+      if (kept) {
+        data[i] = srcR
+        data[i + 1] = srcG
+        data[i + 2] = srcB
+        data[i + 3] = 255
+        continue
+      }
       const sat = pixelSat(red, green, blue)
       const luma = pixelLuma(red, green, blue)
-      const kept = sampleField(protect, pw, ph, x, y, width, height) > 0.35
-      if (!kept && sat < COLOR_SAT) {
+      if (sat < COLOR_SAT) {
         const mapped = inkSCurve(luma, recipe.whiteFloor)
         if (mapped >= 255) {
           red = 255
@@ -904,11 +922,20 @@ function whitenPaperHaze(
   }
 }
 
-function clampPaperWhite(data: Uint8ClampedArray, width: number, height: number, whiteFloor: number) {
+function clampPaperWhite(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  whiteFloor: number,
+  paper?: { protect: Float32Array; sw: number; sh: number },
+) {
   const n = width * height
   const floor = Math.min(PAPER_LUMA, whiteFloor)
   for (let p = 0; p < n; p += 1) {
     const i = p * 4
+    const x = p % width
+    const y = (p / width) | 0
+    if (paper && sampleField(paper.protect, paper.sw, paper.sh, x, y, width, height) > 0.35) continue
     const red = data[i] ?? 0
     const green = data[i + 1] ?? 0
     const blue = data[i + 2] ?? 0
@@ -944,7 +971,11 @@ async function applyScanTone(
 }
 
 /** One mild unsharp after the tone curve. Triple-sharpening turned paper grain into sparkle. */
-function sharpenLuma(image: ImageData, recipe: ScanRecipe) {
+function sharpenLuma(
+  image: ImageData,
+  recipe: ScanRecipe,
+  paper?: { protect: Float32Array; sw: number; sh: number },
+) {
   const { data, width, height } = image
   const gray = new Float32Array(width * height)
   for (let i = 0, p = 0; p < gray.length; p += 1, i += 4) {
@@ -952,6 +983,7 @@ function sharpenLuma(image: ImageData, recipe: ScanRecipe) {
   }
   for (let y = 1; y < height - 1; y += 1) {
     for (let x = 1; x < width - 1; x += 1) {
+      if (paper && sampleField(paper.protect, paper.sw, paper.sh, x, y, width, height) > 0.35) continue
       const p = y * width + x
       const center = gray[p] ?? 0
       const blur =
@@ -1457,12 +1489,12 @@ async function applyMagicColor(image: ImageData, options?: ScanProcessOptions) {
   const { data, width, height } = image
   const clock = { last: performance.now() }
   const paper = await whiteBalanceRgb(data, width, height, clock, options)
-  clampPaperWhite(data, width, height, recipe.whiteFloor)
+  clampPaperWhite(data, width, height, recipe.whiteFloor, paper)
   await applyScanTone(data, width, height, clock)
   await despeckle(data, width, height, clock)
   await despeckleGraySpots(data, width, height, clock)
-  sharpenLuma(image, recipe)
-  clampPaperWhite(data, width, height, recipe.whiteFloor)
+  sharpenLuma(image, recipe, paper)
+  clampPaperWhite(data, width, height, recipe.whiteFloor, paper)
   await darkenFaintInk(data, width, height, clock, paper, recipe)
   unsharpInk(image, paper, recipe)
   whitenPaperHaze(data, width, height, paper, recipe)
@@ -1472,13 +1504,13 @@ async function applyFastBlackWhite(image: ImageData, options?: ScanProcessOption
   const { recipe } = tuneOf(options)
   const { data, width, height } = image
   const clock = { last: performance.now() }
-  await whiteBalanceRgb(data, width, height, clock, options)
-  clampPaperWhite(data, width, height, recipe.whiteFloor)
+  const paper = await whiteBalanceRgb(data, width, height, clock, options)
+  clampPaperWhite(data, width, height, recipe.whiteFloor, paper)
   await applyScanTone(data, width, height, clock)
   await despeckle(data, width, height, clock)
   await despeckleGraySpots(data, width, height, clock)
-  sharpenLuma(image, recipe)
-  clampPaperWhite(data, width, height, recipe.whiteFloor)
+  sharpenLuma(image, recipe, paper)
+  clampPaperWhite(data, width, height, recipe.whiteFloor, paper)
   desaturatePixels(data)
   await yieldBusy(clock)
 }
@@ -1513,6 +1545,7 @@ export async function straightenCanvas(
   const { width, height } = a4Page(isLandscape(corners))
   try {
     const warped = await warpCanvas(copy, corners, width, height)
+    if (isFullFrameCorners(corners, copy.width, copy.height)) return warped
     return whitenOuterBorder(trimDarkMargins(trimToPaper(warped)))
   } finally {
     copy.width = 0

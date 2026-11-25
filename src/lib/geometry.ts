@@ -145,16 +145,13 @@ export function defaultCorners(width: number, height: number, inset = 0.08): Cor
   }
 }
 
-/**
- * Centered portrait document box with ~10% side margins. Never the raw viewfinder
- * edge, which would include a keyboard or desk around the sheet.
- */
+/** Exact image rectangle [0,0] → [width,height], same as "איפוס למלבן מלא". */
 export function fullFrameCorners(width: number, height: number): Corners {
   return {
-    tl: { x: width * 0.1, y: height * 0.08 },
-    tr: { x: width * 0.9, y: height * 0.08 },
-    br: { x: width * 0.9, y: height * 0.92 },
-    bl: { x: width * 0.1, y: height * 0.92 },
+    tl: { x: 0, y: 0 },
+    tr: { x: width, y: 0 },
+    br: { x: width, y: height },
+    bl: { x: 0, y: height },
   }
 }
 
