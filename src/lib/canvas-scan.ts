@@ -295,13 +295,13 @@ async function warpCanvas(
     br: { x: corners.br.x * shrunk.scale, y: corners.br.y * shrunk.scale },
     bl: { x: corners.bl.x * shrunk.scale, y: corners.bl.y * shrunk.scale },
   }
-  const ordered = snapNearOrthogonal((() => {
+  const ordered = (() => {
     try {
       return orderCorners([quad.tl, quad.tr, quad.br, quad.bl])
     } catch {
       return quad
     }
-  })())
+  })()
   // Inverse homography: dest A4 rectangle → source quad (same math as cv.getPerspectiveTransform + warpPerspective).
   const map = homography(
     [
@@ -619,10 +619,7 @@ const INK_PULL_LUMA = 218
 const INK_PULL_SAT = 0.22
 const INK_PULL_GAMMA = 1.65
 const PAPER_HAZE = 218
-const SOLID_INK = 115
-const SOLID_INK_MAX = 20
-const UNSHARP_AMOUNT = 0.25
-const ORTHO_DEG = 2 * (Math.PI / 180)
+const UNSHARP_AMOUNT = 0.65
 
 /** Post-flatten: pull gray ink darker. Paper, color, and photo blocks stay as they are. */
 async function darkenFaintInk(
@@ -668,7 +665,7 @@ function unsharpInk(
     for (let x = 1; x < width - 1; x += 1) {
       const p = y * width + x
       const center = gray[p] ?? 0
-      if (center >= PAPER_HAZE || center < SOLID_INK) continue
+      if (center >= PAPER_HAZE) continue
       const i = p * 4
       if (pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) >= INK_PULL_SAT) continue
       if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
@@ -683,9 +680,7 @@ function unsharpInk(
           (gray[p + width] ?? 0) +
           (gray[p + width + 1] ?? 0)) /
         9
-      const delta = center - blur
-      if (delta > 0 && blur < SOLID_INK + 15) continue
-      const sharp = clamp255(center + UNSHARP_AMOUNT * delta)
+      const sharp = clamp255(center + UNSHARP_AMOUNT * (center - blur))
       const lift = center > 1 ? sharp / center : 1
       data[i] = clamp255((data[i] ?? 0) * lift)
       data[i + 1] = clamp255((data[i + 1] ?? 0) * lift)
@@ -715,58 +710,6 @@ function whitenPaperHaze(
       data[i + 1] = 255
       data[i + 2] = 255
     }
-  }
-}
-
-/** Fill white grain inside bold ink / barcode bars. Photos stay untouched. */
-function fillSolidInk(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  paper: { protect: Float32Array; sw: number; sh: number },
-) {
-  const { protect, sw, sh } = paper
-  const n = width * height
-  const gray = new Float32Array(n)
-  for (let p = 0, i = 0; p < n; p += 1, i += 4) {
-    gray[p] = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
-  }
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
-      const p = y * width + x
-      const i = p * 4
-      if (pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) >= INK_PULL_SAT) continue
-      if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
-      let dark = 0
-      let minLuma = 255
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          const luma = gray[(y + dy) * width + (x + dx)] ?? 255
-          if (luma < SOLID_INK) dark += 1
-          if (luma < minLuma) minLuma = luma
-        }
-      }
-      const luma = gray[p] ?? 255
-      if (dark >= 6 && luma > minLuma) {
-        data[i] = Math.round(minLuma)
-        data[i + 1] = Math.round(minLuma)
-        data[i + 2] = Math.round(minLuma)
-        gray[p] = minLuma
-      }
-    }
-  }
-  for (let p = 0; p < n; p += 1) {
-    const i = p * 4
-    const luma = pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0)
-    if (luma >= SOLID_INK) continue
-    if (pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) >= INK_PULL_SAT) continue
-    const x = p % width
-    const y = (p - x) / width
-    if (sampleField(protect, sw, sh, x, y, width, height) > 0.35) continue
-    const out = Math.round((luma / SOLID_INK) * SOLID_INK_MAX)
-    data[i] = out
-    data[i + 1] = out
-    data[i + 2] = out
   }
 }
 
@@ -834,8 +777,6 @@ function sharpenLuma(image: ImageData) {
       const i = p * 4
       if (
         center >= PAPER_LUMA ||
-        center < SOLID_INK ||
-        (delta > 0 && blur < SOLID_INK + 15) ||
         Math.abs(delta) < SHARPEN_NOISE ||
         pixelSat(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0) > COLOR_SAT
       ) {
@@ -1331,7 +1272,6 @@ async function applyMagicColor(image: ImageData) {
   clampPaperWhite(data, width, height)
   await darkenFaintInk(data, width, height, clock, paper)
   unsharpInk(image, paper)
-  fillSolidInk(data, width, height, paper)
   whitenPaperHaze(data, width, height, paper)
 }
 
@@ -1358,49 +1298,16 @@ export function desaturateCanvas(canvas: HTMLCanvasElement): HTMLCanvasElement {
   return canvas
 }
 
-function snapNearOrthogonal(corners: Corners): Corners {
-  const next: Corners = {
-    tl: { ...corners.tl },
-    tr: { ...corners.tr },
-    br: { ...corners.br },
-    bl: { ...corners.bl },
-  }
-  const bottom = Math.atan2(next.br.y - next.bl.y, next.br.x - next.bl.x)
-  if (Math.abs(bottom) <= ORTHO_DEG) {
-    const y = (next.bl.y + next.br.y) / 2
-    next.bl.y = y
-    next.br.y = y
-  }
-  const left = Math.atan2(next.bl.x - next.tl.x, next.bl.y - next.tl.y)
-  if (Math.abs(left) <= ORTHO_DEG) next.bl.x = next.tl.x
-  const right = Math.atan2(next.br.x - next.tr.x, next.br.y - next.tr.y)
-  if (Math.abs(right) <= ORTHO_DEG) next.br.x = next.tr.x
-  return next
-}
-
 function whitenOuterBorder(source: HTMLCanvasElement) {
-  const context = source.getContext('2d', { willReadFrequently: true })
+  const context = source.getContext('2d')
   if (!context) return source
   const { width, height } = source
   const inset = Math.max(8, Math.round(0.005 * Math.min(width, height)))
-  const bottomBand = Math.max(inset, Math.round(0.012 * height))
   context.fillStyle = '#ffffff'
   context.fillRect(0, 0, width, inset)
+  context.fillRect(0, height - inset, width, inset)
   context.fillRect(0, 0, inset, height)
   context.fillRect(width - inset, 0, inset, height)
-  const image = context.getImageData(0, height - bottomBand, width, bottomBand)
-  const { data } = image
-  for (let i = 0; i < data.length; i += 4) {
-    const red = data[i] ?? 0
-    const green = data[i + 1] ?? 0
-    const blue = data[i + 2] ?? 0
-    if (pixelSat(red, green, blue) >= INK_PULL_SAT) continue
-    if (pixelLuma(red, green, blue) < SOLID_INK) continue
-    data[i] = 255
-    data[i + 1] = 255
-    data[i + 2] = 255
-  }
-  context.putImageData(image, 0, height - bottomBand)
   return source
 }
 
