@@ -46,7 +46,7 @@ export function paintFastFilter(source: HTMLCanvasElement): HTMLCanvasElement {
   return canvas
 }
 
-/** Magic scan: white-point stretch to clean paper; photos lift without ink gamma. */
+/** Magic scan: local flat-field paper white; photos stay original. */
 export async function renderMagic(
   source: HTMLCanvasElement,
   options?: ScanProcessOptions,

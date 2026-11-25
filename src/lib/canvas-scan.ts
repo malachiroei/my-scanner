@@ -14,8 +14,9 @@ export type ScanProcessOptions = {
 const A4_SHORT = 2480
 const A4_LONG = 3508
 const WARP_SOURCE = 4600
-/** Outward centroid expansion in 0..1000 units so header, margins, and barcode stay inside. */
-const PAPER_PAD = 25
+/** Outward centroid expansion in 0..1000 units: keep header/barcode, trim desk on the sides. */
+const PAPER_PAD_X = 4
+const PAPER_PAD_TOP = 25
 const PAPER_PAD_BOTTOM = 28
 
 function padPaperCorners(corners: Corners, width: number, height: number): Corners {
@@ -44,10 +45,10 @@ function padPaperCorners(corners: Corners, width: number, height: number): Corne
     return { x: clampN(cx + dx * sx), y: clampN(cy + dy * sy) }
   }
   return {
-    tl: fromN(push(tl, PAPER_PAD, PAPER_PAD)),
-    tr: fromN(push(tr, PAPER_PAD, PAPER_PAD)),
-    br: fromN(push(br, PAPER_PAD, PAPER_PAD_BOTTOM)),
-    bl: fromN(push(bl, PAPER_PAD, PAPER_PAD_BOTTOM)),
+    tl: fromN(push(tl, PAPER_PAD_X, PAPER_PAD_TOP)),
+    tr: fromN(push(tr, PAPER_PAD_X, PAPER_PAD_TOP)),
+    br: fromN(push(br, PAPER_PAD_X, PAPER_PAD_BOTTOM)),
+    bl: fromN(push(bl, PAPER_PAD_X, PAPER_PAD_BOTTOM)),
   }
 }
 
@@ -360,13 +361,16 @@ async function warpCanvas(
   return canvas
 }
 
-/* ---------- Magic Color: 90th-percentile white-point + gentle gamma. ---------- */
+/* ---------- Magic Color: local flat-field paper white + gentle gamma. ---------- */
 
 const YIELD_MS = 24
-const PAPER_WHITE_MIN = 175
-const PAPER_WHITE_MAX = 245
 const PAPER_GAMMA = 1.18
 const KEEP_FEATHER_PX = 16
+const FIELD_COLS = 32
+const FIELD_ROWS = 45
+const FIELD_PERCENTILE = 0.92
+const FIELD_BOOST = 1.03
+const FIELD_MIN = 140
 
 async function yieldBusy(clock: { last: number }) {
   if (performance.now() - clock.last < YIELD_MS) return
@@ -476,38 +480,105 @@ function keepFeatherAlpha(mask: Uint8Array, width: number, height: number, radiu
   return alpha
 }
 
-function paperWhitePercentile(
+function percentileFromHist(hist: Uint32Array, n: number, p: number) {
+  if (n < 1) return 220
+  const target = n * p
+  let acc = 0
+  for (let value = 0; value < 256; value += 1) {
+    acc += hist[value] ?? 0
+    if (acc >= target) return value
+  }
+  return 255
+}
+
+type PaperField = { cols: number; rows: number; r: Float32Array; g: Float32Array; b: Float32Array }
+
+function buildPaperField(
   data: Uint8ClampedArray,
   width: number,
   height: number,
   protect: Float32Array,
-): number {
-  const hist = new Uint32Array(256)
-  let n = 0
-  const step = Math.max(1, Math.round(Math.min(width, height) / 400))
-  for (let y = 0; y < height; y += step) {
-    for (let x = 0; x < width; x += step) {
-      if ((protect[y * width + x] ?? 0) >= 0.999) continue
-      const i = (y * width + x) * 4
-      const luma = Math.round(pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0))
-      hist[Math.max(0, Math.min(255, luma))] += 1
-      n += 1
+): PaperField {
+  const cols = FIELD_COLS
+  const rows = FIELD_ROWS
+  const r = new Float32Array(cols * rows)
+  const g = new Float32Array(cols * rows)
+  const b = new Float32Array(cols * rows)
+  const valid = new Uint8Array(cols * rows)
+  const histR = new Uint32Array(256)
+  const histG = new Uint32Array(256)
+  const histB = new Uint32Array(256)
+  for (let by = 0; by < rows; by += 1) {
+    const y0 = Math.floor((by / rows) * height)
+    const y1 = Math.max(y0 + 1, Math.floor(((by + 1) / rows) * height))
+    for (let bx = 0; bx < cols; bx += 1) {
+      const x0 = Math.floor((bx / cols) * width)
+      const x1 = Math.max(x0 + 1, Math.floor(((bx + 1) / cols) * width))
+      histR.fill(0)
+      histG.fill(0)
+      histB.fill(0)
+      let n = 0
+      const step = 2
+      for (let y = y0; y < y1; y += step) {
+        const row = y * width
+        for (let x = x0; x < x1; x += step) {
+          if ((protect[row + x] ?? 0) >= 0.999) continue
+          const i = (row + x) * 4
+          histR[data[i] ?? 0] += 1
+          histG[data[i + 1] ?? 0] += 1
+          histB[data[i + 2] ?? 0] += 1
+          n += 1
+        }
+      }
+      if (n < 8) continue
+      const idx = by * cols + bx
+      r[idx] = Math.max(FIELD_MIN, percentileFromHist(histR, n, FIELD_PERCENTILE))
+      g[idx] = Math.max(FIELD_MIN, percentileFromHist(histG, n, FIELD_PERCENTILE))
+      b[idx] = Math.max(FIELD_MIN, percentileFromHist(histB, n, FIELD_PERCENTILE))
+      valid[idx] = 1
     }
   }
-  if (n < 16) return 220
-  const target = n * 0.9
-  let acc = 0
-  for (let luma = 0; luma < 256; luma += 1) {
-    acc += hist[luma] ?? 0
-    if (acc >= target) {
-      return Math.min(PAPER_WHITE_MAX, Math.max(PAPER_WHITE_MIN, luma))
-    }
+  let sumR = 0
+  let sumG = 0
+  let sumB = 0
+  let count = 0
+  for (let i = 0; i < valid.length; i += 1) {
+    if (!valid[i]) continue
+    sumR += r[i] ?? 0
+    sumG += g[i] ?? 0
+    sumB += b[i] ?? 0
+    count += 1
   }
-  return 220
+  const fallbackR = count ? sumR / count : 220
+  const fallbackG = count ? sumG / count : 220
+  const fallbackB = count ? sumB / count : 220
+  for (let i = 0; i < valid.length; i += 1) {
+    if (valid[i]) continue
+    r[i] = fallbackR
+    g[i] = fallbackG
+    b[i] = fallbackB
+  }
+  return { cols, rows, r, g, b }
 }
 
-function liftChannel(value: number, scale: number) {
-  return Math.min(255, value * scale)
+function sampleField(field: PaperField, channel: Float32Array, x: number, y: number, width: number, height: number) {
+  const u = ((x + 0.5) / width) * field.cols - 0.5
+  const v = ((y + 0.5) / height) * field.rows - 0.5
+  const x0 = Math.max(0, Math.min(field.cols - 1, Math.floor(u)))
+  const y0 = Math.max(0, Math.min(field.rows - 1, Math.floor(v)))
+  const x1 = Math.min(field.cols - 1, x0 + 1)
+  const y1 = Math.min(field.rows - 1, y0 + 1)
+  const tx = Math.min(1, Math.max(0, u - Math.floor(u)))
+  const ty = Math.min(1, Math.max(0, v - Math.floor(v)))
+  const a = channel[y0 * field.cols + x0] ?? 220
+  const b = channel[y0 * field.cols + x1] ?? 220
+  const c = channel[y1 * field.cols + x0] ?? 220
+  const d = channel[y1 * field.cols + x1] ?? 220
+  return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty
+}
+
+function flattenChannel(value: number, localPaper: number) {
+  return clamp255((value / Math.max(1, localPaper)) * 255 * FIELD_BOOST)
 }
 
 function gammaChannel(value: number) {
@@ -519,32 +590,34 @@ async function applyWhitePointLevels(image: ImageData, options?: ScanProcessOpti
   const clock = { last: performance.now() }
   const protect = destKeepMask(width, height, options)
   const alpha = keepFeatherAlpha(protect, width, height, KEEP_FEATHER_PX)
-  const paperWhite = paperWhitePercentile(data, width, height, alpha)
-  const scale = 255 / Math.max(1, paperWhite)
+  const field = buildPaperField(data, width, height, alpha)
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
     const row = y * width
     for (let x = 0; x < width; x += 1) {
       const i = (row + x) * 4
       const a = alpha[row + x] ?? 0
-      const r = liftChannel(data[i] ?? 0, scale)
-      const g = liftChannel(data[i + 1] ?? 0, scale)
-      const b = liftChannel(data[i + 2] ?? 0, scale)
+      const origR = data[i] ?? 0
+      const origG = data[i + 1] ?? 0
+      const origB = data[i + 2] ?? 0
+      if (a >= 1) {
+        data[i + 3] = 255
+        continue
+      }
+      const flatR = flattenChannel(origR, sampleField(field, field.r, x, y, width, height))
+      const flatG = flattenChannel(origG, sampleField(field, field.g, x, y, width, height))
+      const flatB = flattenChannel(origB, sampleField(field, field.b, x, y, width, height))
+      const outR = gammaChannel(flatR)
+      const outG = gammaChannel(flatG)
+      const outB = gammaChannel(flatB)
       if (a <= 0) {
-        data[i] = gammaChannel(r)
-        data[i + 1] = gammaChannel(g)
-        data[i + 2] = gammaChannel(b)
-      } else if (a >= 1) {
-        data[i] = r
-        data[i + 1] = g
-        data[i + 2] = b
+        data[i] = outR
+        data[i + 1] = outG
+        data[i + 2] = outB
       } else {
-        const gr = gammaChannel(r)
-        const gg = gammaChannel(g)
-        const gb = gammaChannel(b)
-        data[i] = clamp255(gr + (r - gr) * a)
-        data[i + 1] = clamp255(gg + (g - gg) * a)
-        data[i + 2] = clamp255(gb + (b - gb) * a)
+        data[i] = clamp255(outR + (origR - outR) * a)
+        data[i + 1] = clamp255(outG + (origG - outG) * a)
+        data[i + 2] = clamp255(outB + (origB - outB) * a)
       }
       data[i + 3] = 255
     }
@@ -614,7 +687,7 @@ async function processPixels(
   return canvas
 }
 
-/** Magic Color: Original-fidelity text on a clean white page. Photos get a white-point lift without ink gamma. */
+/** Magic Color: local flat-field paper white. Photos in keepOriginalBoxes stay original. */
 export async function applyCanvasMagic(
   source: HTMLCanvasElement,
   options?: ScanProcessOptions,

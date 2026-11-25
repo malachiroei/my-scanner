@@ -10,12 +10,12 @@ CRITICAL: Israeli official documents and bills have a horizontal tear-line or co
 
 IMPORTANT: The bottom 25% of Israeli bills/tickets is a colored or shaded payment stub ('הודעת זיכוי' / 'קבלה') ending with a barcode line at the very bottom, and the top 10% has a postal header/barcode. You MUST include BOTH the top postal header AND the entire bottom colored payment stub + bottom barcode inside paperCorners. Find the actual outer boundary where the white paper ends against the beige/wood desk table — NEVER stop at the border of the colored payment stub.
 
-paperCorners must hug the EXACT physical boundary where the white paper meets the darker desk — left, right, top, and bottom. Crop out the desk, keyboard, calculator, and any surrounding objects completely. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR. Never cut across the page at internal lines or tables.
+paperCorners must hug the EXACT physical boundary where the white paper meets the darker desk — left, right, top, and bottom. Place the LEFT and RIGHT edges flush with the physical left/right edges of the white A4 paper so ZERO desk strips remain on the sides. Crop out the desk, keyboard, calculator, and any surrounding objects completely. Include the full sheet: letterhead, body, AND the payment stub with barcodes/QR. Never cut across the page at internal lines or tables.
 
 If the sheet is portrait A4, paperCorners MUST be a portrait quadrilateral (taller than it is wide) around the paper only. Never return the full landscape camera frame unless the paper truly fills the entire photo.
 
 Return JSON only, with:
-- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. Place each corner on the paper/desk boundary. The client expands every corner outward from the quad centroid by at least +25 units (bottom +28); add NO extra margin yourself. x is horizontal, y is vertical.
+- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. Place left/right corners flush with the paper edge. The client expands +4 units on left/right, +25 on top, and +28 on the bottom; add NO extra margin yourself. x is horizontal, y is vertical.
 - keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, or graphic that must keep natural color. Pad each box generously by at least +20 units on all four sides. Empty array if none.
 - qaNotes: one short Hebrew sentence (e.g. "זוהו 2 תמונות רכב מוגנות").`
 
