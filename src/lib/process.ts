@@ -24,7 +24,7 @@ async function renderWithCanvas(
   return { canvas, width: canvas.width, height: canvas.height }
 }
 
-/** Perspective warp onto a full A4 canvas. */
+/** Perspective warp onto a canvas matching the paper's aspect ratio. */
 export async function straightenDocument(
   image: CanvasImageSource,
   corners: Corners,
@@ -46,7 +46,7 @@ export function paintFastFilter(source: HTMLCanvasElement): HTMLCanvasElement {
   return canvas
 }
 
-/** Magic scan: white-point stretch to clean paper, photos left untouched. */
+/** Magic scan: white-point stretch to clean paper; photos lift without ink gamma. */
 export async function renderMagic(
   source: HTMLCanvasElement,
   options?: ScanProcessOptions,

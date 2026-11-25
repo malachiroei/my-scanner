@@ -10,25 +10,24 @@ export type ScanProcessOptions = {
   sourceHeight?: number
 }
 
-/** 300 DPI A4 short edge, or the source paper crop when the sensor already has more pixels. */
-const A4_SHORT = 2480
+/** 300 DPI A4 long edge. Output matches the paper quad — never a forced 4:3 / A4 box. */
 const A4_LONG = 3508
 const WARP_SOURCE = 4600
 
 function destPage(corners: Corners): { width: number; height: number } {
-  const srcW = (distance(corners.tl, corners.tr) + distance(corners.bl, corners.br)) / 2
-  const srcH = (distance(corners.tl, corners.bl) + distance(corners.tr, corners.br)) / 2
-  const landscape = srcW > srcH * 1.15
-  const srcShort = Math.min(srcW, srcH)
-  const srcLong = Math.max(srcW, srcH)
-  let short = Math.max(A4_SHORT, Math.round(srcShort))
-  let long = Math.max(A4_LONG, Math.round(srcLong), Math.round(short * Math.SQRT2))
-  if (long > WARP_SOURCE) {
-    const scale = WARP_SOURCE / long
-    long = WARP_SOURCE
-    short = Math.max(A4_SHORT, Math.round(short * scale))
+  const quadWidth = (distance(corners.tl, corners.tr) + distance(corners.bl, corners.br)) / 2
+  const quadHeight = (distance(corners.tl, corners.bl) + distance(corners.tr, corners.br)) / 2
+  const longEdge = Math.max(quadWidth, quadHeight, 1)
+  const scale = A4_LONG / longEdge
+  let width = Math.max(1, Math.round(quadWidth * scale))
+  let height = Math.max(1, Math.round(quadHeight * scale))
+  const cap = Math.max(width, height)
+  if (cap > WARP_SOURCE) {
+    const shrink = WARP_SOURCE / cap
+    width = Math.max(1, Math.round(width * shrink))
+    height = Math.max(1, Math.round(height * shrink))
   }
-  return landscape ? { width: long, height: short } : { width: short, height: long }
+  return { width, height }
 }
 
 
@@ -271,9 +270,8 @@ function paintScaled(
 }
 
 /**
- * Map the paper trapezoid onto a flat A4. Inverse homography + bicubic sample.
- * Stretching the shorter far edge is what lifts the page to face the camera.
- * No OpenCV — loading WASM here froze the phone after shutter.
+ * Map the paper trapezoid onto a flat page that keeps the paper's aspect ratio.
+ * Inverse homography + bicubic sample. No OpenCV — WASM froze the phone after shutter.
  */
 async function warpCanvas(
   source: HTMLCanvasElement,
@@ -340,6 +338,7 @@ const YIELD_MS = 24
 const PAPER_WHITE_MIN = 175
 const PAPER_WHITE_MAX = 245
 const PAPER_GAMMA = 1.18
+const KEEP_FEATHER_PX = 16
 
 async function yieldBusy(clock: { last: number }) {
   if (performance.now() - clock.last < YIELD_MS) return
@@ -416,18 +415,61 @@ function destKeepMask(destW: number, destH: number, options?: ScanProcessOptions
   return mask
 }
 
+/** Distance from the protect-box edge, mapped to 0 (outside) … 1 (16px or deeper inside). */
+function keepFeatherAlpha(mask: Uint8Array, width: number, height: number, radius: number): Float32Array {
+  const alpha = new Float32Array(width * height)
+  const maxd = radius + 2
+  for (let i = 0; i < mask.length; i += 1) alpha[i] = mask[i] ? maxd : 0
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width
+    for (let x = 0; x < width; x += 1) {
+      const i = row + x
+      if (!mask[i]) continue
+      let d = alpha[i] ?? maxd
+      if (x > 0) d = Math.min(d, (alpha[i - 1] ?? 0) + 1)
+      if (y > 0) d = Math.min(d, (alpha[i - width] ?? 0) + 1)
+      if (x > 0 && y > 0) d = Math.min(d, (alpha[i - width - 1] ?? 0) + 1.41421356)
+      if (x + 1 < width && y > 0) d = Math.min(d, (alpha[i - width + 1] ?? 0) + 1.41421356)
+      alpha[i] = d
+    }
+  }
+  for (let y = height - 1; y >= 0; y -= 1) {
+    const row = y * width
+    for (let x = width - 1; x >= 0; x -= 1) {
+      const i = row + x
+      if (!mask[i]) continue
+      let d = alpha[i] ?? maxd
+      if (x + 1 < width) d = Math.min(d, (alpha[i + 1] ?? 0) + 1)
+      if (y + 1 < height) d = Math.min(d, (alpha[i + width] ?? 0) + 1)
+      if (x + 1 < width && y + 1 < height) d = Math.min(d, (alpha[i + width + 1] ?? 0) + 1.41421356)
+      if (x > 0 && y + 1 < height) d = Math.min(d, (alpha[i + width - 1] ?? 0) + 1.41421356)
+      alpha[i] = d
+    }
+  }
+  const inv = 1 / Math.max(1, radius)
+  for (let i = 0; i < alpha.length; i += 1) {
+    if (!mask[i]) {
+      alpha[i] = 0
+      continue
+    }
+    const t = (alpha[i] ?? 0) * inv
+    alpha[i] = t >= 1 ? 1 : t
+  }
+  return alpha
+}
+
 function paperWhitePercentile(
   data: Uint8ClampedArray,
   width: number,
   height: number,
-  protect: Uint8Array,
+  protect: Float32Array,
 ): number {
   const hist = new Uint32Array(256)
   let n = 0
   const step = Math.max(1, Math.round(Math.min(width, height) / 400))
   for (let y = 0; y < height; y += step) {
     for (let x = 0; x < width; x += step) {
-      if (protect[y * width + x]) continue
+      if ((protect[y * width + x] ?? 0) >= 0.999) continue
       const i = (y * width + x) * 4
       const luma = Math.round(pixelLuma(data[i] ?? 0, data[i + 1] ?? 0, data[i + 2] ?? 0))
       hist[Math.max(0, Math.min(255, luma))] += 1
@@ -446,26 +488,46 @@ function paperWhitePercentile(
   return 220
 }
 
-function stretchChannel(value: number, scale: number) {
-  const lifted = Math.min(255, value * scale)
-  return clamp255(Math.pow(lifted / 255, PAPER_GAMMA) * 255)
+function liftChannel(value: number, scale: number) {
+  return Math.min(255, value * scale)
+}
+
+function gammaChannel(value: number) {
+  return clamp255(Math.pow(value / 255, PAPER_GAMMA) * 255)
 }
 
 async function applyWhitePointLevels(image: ImageData, options?: ScanProcessOptions) {
   const { data, width, height } = image
   const clock = { last: performance.now() }
   const protect = destKeepMask(width, height, options)
-  const paperWhite = paperWhitePercentile(data, width, height, protect)
+  const alpha = keepFeatherAlpha(protect, width, height, KEEP_FEATHER_PX)
+  const paperWhite = paperWhitePercentile(data, width, height, alpha)
   const scale = 255 / Math.max(1, paperWhite)
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
     const row = y * width
     for (let x = 0; x < width; x += 1) {
-      if (protect[row + x]) continue
       const i = (row + x) * 4
-      data[i] = stretchChannel(data[i] ?? 0, scale)
-      data[i + 1] = stretchChannel(data[i + 1] ?? 0, scale)
-      data[i + 2] = stretchChannel(data[i + 2] ?? 0, scale)
+      const a = alpha[row + x] ?? 0
+      const r = liftChannel(data[i] ?? 0, scale)
+      const g = liftChannel(data[i + 1] ?? 0, scale)
+      const b = liftChannel(data[i + 2] ?? 0, scale)
+      if (a <= 0) {
+        data[i] = gammaChannel(r)
+        data[i + 1] = gammaChannel(g)
+        data[i + 2] = gammaChannel(b)
+      } else if (a >= 1) {
+        data[i] = r
+        data[i + 1] = g
+        data[i + 2] = b
+      } else {
+        const gr = gammaChannel(r)
+        const gg = gammaChannel(g)
+        const gb = gammaChannel(b)
+        data[i] = clamp255(gr + (r - gr) * a)
+        data[i + 1] = clamp255(gg + (g - gg) * a)
+        data[i + 2] = clamp255(gb + (b - gb) * a)
+      }
       data[i + 3] = 255
     }
   }
@@ -846,7 +908,7 @@ async function processPixels(
   return canvas
 }
 
-/** Magic Color: Original-fidelity text on a clean white page. Photos in keepOriginalBoxes stay untouched. */
+/** Magic Color: Original-fidelity text on a clean white page. Photos get a white-point lift without ink gamma. */
 export async function applyCanvasMagic(
   source: HTMLCanvasElement,
   options?: ScanProcessOptions,
