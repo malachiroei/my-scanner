@@ -335,7 +335,7 @@ function paintScaled(
 
 /**
  * True 3×3 projective homography: dest A4 (0,0)→(2480,3508) ← H^-1 — source paper quad.
- * Bicubic sample. No OpenCV — WASM froze the phone after shutter.
+ * Accepts steep trapezoids (narrow top, wide bottom). Bicubic sample. No OpenCV.
  */
 async function warpCanvas(
   source: HTMLCanvasElement,

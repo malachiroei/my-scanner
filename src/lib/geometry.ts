@@ -56,8 +56,10 @@ function segmentsIntersect(a: Point, b: Point, c: Point, d: Point): boolean {
   return t > eps && t < 1 - eps && u > eps && u < 1 - eps
 }
 
-/** 220 units in 0..1000 space: allow perspective trapezoids from a tilted camera. */
-const QUAD_ALIGN = 0.22
+/** 450 units in 0..1000 space: allow steep-angle perspective trapezoids. */
+const QUAD_ALIGN = 0.45
+const QUAD_MIN_TAPER = 0.35
+const QUAD_MIN_AREA = 0.12
 
 export function cornersValid(corners: Corners, width: number, height: number): boolean {
   const points = [corners.tl, corners.tr, corners.br, corners.bl]
@@ -73,9 +75,15 @@ export function cornersValid(corners: Corners, width: number, height: number): b
   return edgeWidth >= 32 && edgeHeight >= 32
 }
 
-/** Convex paper quad with a roughly upright top and sides. Rejects twisted Gemini pins. */
+/** Convex paper quad, including steep trapezoids from a low camera angle. */
 export function paperQuadIsStable(corners: Corners, width: number, height: number): boolean {
   if (!cornersValid(corners, width, height) || !quadIsConvex(corners)) return false
+  if (cornersArea(corners) < width * height * QUAD_MIN_AREA) return false
+  const topWidth = distance(corners.tl, corners.tr)
+  const bottomWidth = distance(corners.bl, corners.br)
+  const long = Math.max(topWidth, bottomWidth, 1)
+  const short = Math.min(topWidth, bottomWidth)
+  if (short < QUAD_MIN_TAPER * long) return false
   const maxDx = QUAD_ALIGN * width
   const maxDy = QUAD_ALIGN * height
   if (Math.abs(corners.tl.y - corners.tr.y) >= maxDy) return false

@@ -4,7 +4,9 @@ const MAX_IMAGE_CHARS = 1_800_000
 
 const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This JPEG is the FULL uncropped camera frame, already rotated to an upright portrait (width < height): a white A4 sheet sitting on a desk, often with a calculator, keyboard, or other objects beside it. The client will apply a true 3×3 projective homography from your paperCorners onto a rectangular A4 page. You must locate the physical sheet.
 
-Place topLeft, topRight, bottomRight, and bottomLeft PRECISELY on the 4 physical corners where the white paper sheet meets the darker desk (0..1000). The sheet is often a perspective TRAPEZOID (narrower at the top, wider at the bottom) when the phone is tilted — that is correct; return those 4 corners, do not force a rectangle.
+The user may hold the camera at a steep angle so the paper looks like a strong trapezoid (narrow top edge, wide bottom edge). Trace the exact 4 outer physical corners of the white paper sheet (topLeft, topRight, bottomRight, bottomLeft in 0..1000), making sure the top edge sits ABOVE the very top postal header/stamps and the bottom edge sits BELOW the bottom barcode line. Do NOT simplify the trapezoid into a rectangle — return the true tilted corners so 3×3 projective homography can lift and straighten the page.
+
+Place topLeft, topRight, bottomRight, and bottomLeft PRECISELY on the 4 physical corners where the white paper sheet meets the darker desk (0..1000).
 
 Each point must sit on the paper/desk corner, not on ink, logos, or a few millimetres inward:
 - topLeft AND topRight both sit on the TRUE TOP PAPER EDGE, above the highest stamp, logo, "לכבוד", "שולם", or postal header, so the homography can lift the entire top edge to y=0 (level across the A4 page). Never place topRight.y below topLeft.y unless the physical paper itself is tilted that way — follow the actual paper corner, not the printed text.
@@ -24,7 +26,7 @@ paperCorners must hug the EXACT physical boundary where the white paper meets th
 If the sheet is portrait A4, paperCorners MUST be a portrait quadrilateral (taller than it is wide) around the paper only. Never return the full landscape camera frame unless the paper truly fills the entire photo.
 
 Return JSON only, with:
-- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. The JPEG is an upright portrait of the full frame. Place each point on the physical paper/desk corner. The client expands +6 units top/bottom and 0 left/right; add NO extra margin yourself. x is horizontal, y is vertical.
+- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. The JPEG is an upright portrait of the full frame. Place each point on the physical paper/desk corner. The client expands +24 units top/bottom and +2 left/right; add NO extra margin yourself. x is horizontal, y is vertical.
 - keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, or graphic that must keep natural color. Pad each box generously by at least +20 units on all four sides. Empty array if none.
 - qaNotes: one short Hebrew sentence (e.g. "זוהו 2 תמונות רכב מוגנות").`
 
@@ -155,9 +157,18 @@ function paperQuadLooksUpright(pairs: number[][]): boolean {
     sign = next
   }
   if (sign === 0) return false
-  if (Math.abs(tl.y - tr.y) >= 220) return false
-  if (Math.abs(tl.x - bl.x) >= 220) return false
-  if (Math.abs(tr.x - br.x) >= 220) return false
+  const topWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y)
+  const bottomWidth = Math.hypot(br.x - bl.x, br.y - bl.y)
+  const long = Math.max(topWidth, bottomWidth, 1)
+  const short = Math.min(topWidth, bottomWidth)
+  if (short < 0.35 * long) return false
+  const area = Math.abs(
+    tl.x * tr.y - tr.x * tl.y + tr.x * br.y - br.x * tr.y + br.x * bl.y - bl.x * br.y + bl.x * tl.y - tl.x * bl.y,
+  ) / 2
+  if (area < 0.12 * 1000 * 1000) return false
+  if (Math.abs(tl.y - tr.y) >= 450) return false
+  if (Math.abs(tl.x - bl.x) >= 450) return false
+  if (Math.abs(tr.x - br.x) >= 450) return false
   return true
 }
 

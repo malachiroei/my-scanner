@@ -222,34 +222,37 @@ export function CameraCapture() {
 
   return (
     <div className="fixed inset-0 z-40 flex h-[100dvh] max-h-[100dvh] flex-col overflow-hidden bg-black text-white">
-      <div className="relative min-h-0 flex-1 overflow-hidden">
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-black [container-type:size]">
+      <div
+        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 overflow-hidden bg-black"
+        style={{
+          width: 'min(100cqw, calc(100cqh * 3 / 4))',
+          height: 'min(100cqh, calc(100cqw * 4 / 3))',
+        }}
+      >
       <video
         ref={videoRef}
-        className={`absolute inset-0 h-full w-full bg-black object-cover ${facing === 'user' ? '-scale-x-100' : ''}`}
+        className={`absolute inset-0 h-full w-full bg-black object-contain ${facing === 'user' ? '-scale-x-100' : ''}`}
         autoPlay
         muted
         playsInline
       />
-      <div className="pointer-events-none absolute inset-0 [container-type:size]" aria-hidden="true">
-        <svg
-          viewBox="0 0 1000 1414"
-          preserveAspectRatio="none"
-          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-          style={{
-            height: '88cqh',
-            width: 'calc(88cqh / 1.414)',
-          }}
-        >
-          <path
-            d="M 0 140 L 0 0 L 140 0 M 860 0 L 1000 0 L 1000 140 M 1000 1274 L 1000 1414 L 860 1414 M 140 1414 L 0 1414 L 0 1274"
-            fill="none"
-            stroke="rgba(255,255,255,0.78)"
-            strokeWidth={1.6}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            vectorEffect="non-scaling-stroke"
-          />
-        </svg>
+      <svg
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+        className="pointer-events-none absolute inset-[4%]"
+        aria-hidden="true"
+      >
+        <path
+          d="M 0 14 L 0 0 L 14 0 M 86 0 L 100 0 L 100 14 M 100 86 L 100 100 L 86 100 M 14 100 L 0 100 L 0 86"
+          fill="none"
+          stroke="rgba(255,255,255,0.78)"
+          strokeWidth={1.6}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
       </div>
       <div className="absolute inset-x-0 top-0 flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))]">
         <button
