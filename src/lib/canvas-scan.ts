@@ -14,10 +14,10 @@ export type ScanProcessOptions = {
 const A4_SHORT = 2480
 const A4_LONG = 3508
 const WARP_SOURCE = 4600
-/** Outward centroid expansion in 0..1000 units so all four paper corners stay inside the warp. */
-const PAPER_PAD_X = 22
-const PAPER_PAD_TOP = 35
-const PAPER_PAD_BOTTOM = 35
+/** Outward centroid expansion in 0..1000 units so header/barcode stay in while sides stay tight. */
+const PAPER_PAD_X = 10
+const PAPER_PAD_TOP = 28
+const PAPER_PAD_BOTTOM = 28
 
 function padPaperCorners(corners: Corners, width: number, height: number): Corners {
   const toN = (point: Point): Point => ({
@@ -199,6 +199,44 @@ function homography(from: Point[], to: Point[]): number[] | null {
   ]
 }
 
+/** Inverse of a 3×3 homography (row-major 9). Used as H^-1: dest A4 → source quad. */
+function invertHomography(h: number[]): number[] | null {
+  const a = h[0] ?? 0
+  const b = h[1] ?? 0
+  const c = h[2] ?? 0
+  const d = h[3] ?? 0
+  const e = h[4] ?? 0
+  const f = h[5] ?? 0
+  const g = h[6] ?? 0
+  const hh = h[7] ?? 0
+  const i = h[8] ?? 1
+  const A = e * i - f * hh
+  const B = f * g - d * i
+  const C = d * hh - e * g
+  const det = a * A + b * B + c * C
+  if (Math.abs(det) < 1e-12) return null
+  const inv = 1 / det
+  return [
+    A * inv,
+    (c * hh - b * i) * inv,
+    (b * f - c * e) * inv,
+    B * inv,
+    (a * i - c * g) * inv,
+    (c * d - a * f) * inv,
+    C * inv,
+    (b * g - a * hh) * inv,
+    (a * e - b * d) * inv,
+  ]
+}
+
+/** H^-1 that maps a dest rectangle pixel to the source quad (projective, not bilinear). */
+function destToSourceHomography(dest: Point[], source: Point[]): number[] | null {
+  const forward = homography(source, dest)
+  const inverse = forward ? invertHomography(forward) : null
+  if (inverse) return inverse
+  return homography(dest, source)
+}
+
 function mapHomography(h: number[], x: number, y: number): Point {
   const w = (h[6] ?? 0) * x + (h[7] ?? 0) * y + (h[8] ?? 1)
   const safe = Math.abs(w) < 1e-6 ? 1e-6 : w
@@ -296,8 +334,8 @@ function paintScaled(
 }
 
 /**
- * Map the four expanded paper corners onto a 2480×3508 A4 rectangle.
- * Inverse homography + bicubic sample. No OpenCV — WASM froze the phone after shutter.
+ * True 3×3 projective homography: dest A4 (0,0)→(2480,3508) ← H^-1 — source paper quad.
+ * Bicubic sample. No OpenCV — WASM froze the phone after shutter.
  */
 async function warpCanvas(
   source: HTMLCanvasElement,
@@ -319,16 +357,14 @@ async function warpCanvas(
       return quad
     }
   })()
-  // Inverse homography: dest A4 rectangle → source quad (same math as cv.getPerspectiveTransform + warpPerspective).
-  const map = homography(
-    [
-      { x: 0, y: 0 },
-      { x: width, y: 0 },
-      { x: width, y: height },
-      { x: 0, y: height },
-    ],
-    [ordered.tl, ordered.tr, ordered.br, ordered.bl],
-  )
+  const destRect = [
+    { x: 0, y: 0 },
+    { x: width, y: 0 },
+    { x: width, y: height },
+    { x: 0, y: height },
+  ]
+  const sourceQuad = [ordered.tl, ordered.tr, ordered.br, ordered.bl]
+  const map = destToSourceHomography(destRect, sourceQuad)
   if (!map) return paintScaled(source, width, height, corners)
 
   const src = shrunk.canvas
@@ -406,7 +442,7 @@ function destKeepMask(destW: number, destH: number, options?: ScanProcessOptions
       return padded
     }
   })()
-  const map = homography(
+  const map = destToSourceHomography(
     [
       { x: 0, y: 0 },
       { x: destW, y: 0 },

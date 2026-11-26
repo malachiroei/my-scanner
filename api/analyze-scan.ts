@@ -2,13 +2,17 @@ const GEMINI_URL =
   'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
 const MAX_IMAGE_CHARS = 1_800_000
 
-const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This JPEG is the FULL uncropped camera frame, already rotated to an upright portrait (width < height): a white A4 sheet sitting on a desk, often with a calculator, keyboard, or other objects beside it. The client will 4-point perspective-warp from your paperCorners onto a rectangular A4 page. You must locate the physical sheet.
+const DIRECTOR_PROMPT = `You are an expert document-scanner QA engineer. This JPEG is the FULL uncropped camera frame, already rotated to an upright portrait (width < height): a white A4 sheet sitting on a desk, often with a calculator, keyboard, or other objects beside it. The client will apply a true 3×3 projective homography from your paperCorners onto a rectangular A4 page. You must locate the physical sheet.
 
-Carefully TRACE the 4 physical OUTER CORNERS of the white paper sheet. paperCorners is [topLeft, topRight, bottomRight, bottomLeft] in 0..1000 of this FULL IMAGE. Each point must sit on the paper/desk boundary, not on ink or logos:
-- topLeft: ABOVE and LEFT of the top-left municipal logo/emblem (never cut through the top-left corner of the page).
+Carefully TRACE the 4 TRUE OUTER CORNERS of the physical white A4 sheet. paperCorners is [topLeft, topRight, bottomRight, bottomLeft] in 0..1000 of this FULL IMAGE. The sheet is often a perspective TRAPEZOID (narrower at the top, wider at the bottom) when the phone is tilted — that is correct; return those 4 corners, do not force a rectangle.
+
+Each point must sit on the paper/desk boundary, not on ink or logos:
+- topLeft: ABOVE and LEFT of the top-left address lines / municipal logo (all top text/addresses/postal headers stay INSIDE the top edge).
 - topRight: ABOVE and RIGHT of the postal stamp (P.P.).
-- bottomLeft and bottomRight: BELOW the bottom barcode line (e.g. 567830928...).
-The top edge must be roughly horizontal and the left/right edges roughly vertical. Return a clean convex quadrilateral.
+- bottomLeft and bottomRight: BELOW the entire payment stub and the bottom barcode/text line (e.g. 567830928...) so that line stays INSIDE the bottom edge.
+- Left and right edges hug the white paper boundary so no desk background remains.
+
+Return a clean convex quadrilateral. Tightly frame ONLY the white A4 sheet.
 
 Locate ALL FOUR outer physical edges of the white A4 paper (left, right, top, and bottom). Cut away any keyboard, desk, wood, beige table, calculator, or background. Keep the entire paper sheet inside, including the top postal header and the bottom barcode. Never return the full camera frame [0,0]–[1000,1000] unless the paper truly fills every pixel.
 
@@ -21,7 +25,7 @@ paperCorners must hug the EXACT physical boundary where the white paper meets th
 If the sheet is portrait A4, paperCorners MUST be a portrait quadrilateral (taller than it is wide) around the paper only. Never return the full landscape camera frame unless the paper truly fills the entire photo.
 
 Return JSON only, with:
-- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. The JPEG is an upright portrait of the full frame. The client expands +22 units left/right and +35 top/bottom; add NO extra margin yourself. x is horizontal, y is vertical.
+- paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. The JPEG is an upright portrait of the full frame. Hug the physical paper edges. The client expands +10 units left/right and +28 top/bottom; add NO extra margin yourself. x is horizontal, y is vertical.
 - keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, or graphic that must keep natural color. Pad each box generously by at least +20 units on all four sides. Empty array if none.
 - qaNotes: one short Hebrew sentence (e.g. "זוהו 2 תמונות רכב מוגנות").`
 
@@ -152,9 +156,9 @@ function paperQuadLooksUpright(pairs: number[][]): boolean {
     sign = next
   }
   if (sign === 0) return false
-  if (Math.abs(tl.y - tr.y) >= 120) return false
-  if (Math.abs(tl.x - bl.x) >= 120) return false
-  if (Math.abs(tr.x - br.x) >= 120) return false
+  if (Math.abs(tl.y - tr.y) >= 220) return false
+  if (Math.abs(tl.x - bl.x) >= 220) return false
+  if (Math.abs(tr.x - br.x) >= 220) return false
   return true
 }
 

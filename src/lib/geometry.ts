@@ -56,8 +56,8 @@ function segmentsIntersect(a: Point, b: Point, c: Point, d: Point): boolean {
   return t > eps && t < 1 - eps && u > eps && u < 1 - eps
 }
 
-/** 120 units in 0..1000 space: top edge ~horizontal, left/right ~vertical. */
-const QUAD_ALIGN = 0.12
+/** 220 units in 0..1000 space: allow perspective trapezoids from a tilted camera. */
+const QUAD_ALIGN = 0.22
 
 export function cornersValid(corners: Corners, width: number, height: number): boolean {
   const points = [corners.tl, corners.tr, corners.br, corners.bl]
