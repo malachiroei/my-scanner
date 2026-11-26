@@ -237,22 +237,12 @@ export function CameraCapture() {
         muted
         playsInline
       />
-      <svg
-        viewBox="0 0 100 100"
-        preserveAspectRatio="none"
-        className="pointer-events-none absolute inset-[4%]"
-        aria-hidden="true"
-      >
-        <path
-          d="M 0 14 L 0 0 L 14 0 M 86 0 L 100 0 L 100 14 M 100 86 L 100 100 L 86 100 M 14 100 L 0 100 L 0 86"
-          fill="none"
-          stroke="rgba(255,255,255,0.78)"
-          strokeWidth={1.6}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      </svg>
+      <div className="pointer-events-none absolute inset-0" aria-hidden="true">
+        <span className="absolute left-[4%] top-[4%] h-11 w-11 border-l-2 border-t-2 border-white/80" />
+        <span className="absolute right-[4%] top-[4%] h-11 w-11 border-r-2 border-t-2 border-white/80" />
+        <span className="absolute bottom-[4%] right-[4%] h-11 w-11 border-b-2 border-r-2 border-white/80" />
+        <span className="absolute bottom-[4%] left-[4%] h-11 w-11 border-b-2 border-l-2 border-white/80" />
+      </div>
       </div>
       <div className="absolute inset-x-0 top-0 flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))]">
         <button
