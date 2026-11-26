@@ -14,10 +14,10 @@ export type ScanProcessOptions = {
 const A4_SHORT = 2480
 const A4_LONG = 3508
 const WARP_SOURCE = 4600
-/** Tiny vertical safety only — sides hug the paper so the A4 page fills with the document. */
-const PAPER_PAD_X = 0
-const PAPER_PAD_TOP = 6
-const PAPER_PAD_BOTTOM = 6
+/** Tight sides, extra top/bottom so postal headers and barcodes never clip. */
+const PAPER_PAD_X = 2
+const PAPER_PAD_TOP = 24
+const PAPER_PAD_BOTTOM = 24
 
 function padPaperCorners(corners: Corners, width: number, height: number): Corners {
   const toN = (point: Point): Point => ({
