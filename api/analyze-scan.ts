@@ -27,7 +27,7 @@ If the sheet is portrait A4, paperCorners MUST be a portrait quadrilateral (tall
 
 Return JSON only, with:
 - paperCorners: exactly 4 [x, y] points in 0..1000 of this FULL IMAGE. Order: [topLeft, topRight, bottomRight, bottomLeft]. The JPEG is an upright portrait of the full frame. Place each point on the physical paper/desk corner. The client expands +24 units top/bottom and +2 left/right; add NO extra margin yourself. x is horizontal, y is vertical.
-- keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Cover every embedded photograph (vehicle photos in traffic tickets, portraits), colored seal/emblem/logo, stamp, or graphic that must keep natural color. Pad each box generously by at least +20 units on all four sides. Empty array if none.
+- keepOriginalBoxes: axis-aligned boxes [ymin, xmin, ymax, xmax] in 0..1000 of this FULL IMAGE (same coordinate space as paperCorners, not the cropped page). Include ONLY true photographic insets — vehicle evidence photos, portraits, or camera photographs printed on the page (photo / vehicle / portrait). Do NOT box municipal logos, seals, emblems, coats of arms, stamps, colored text headers, or flat printed graphics; Magic Color already preserves those. Pad each photo box generously by at least +20 units on all four sides. Empty array if there are no photographs.
 - qaNotes: one short Hebrew sentence (e.g. "זוהו 2 תמונות רכב מוגנות").`
 
 const RESPONSE_SCHEMA = {

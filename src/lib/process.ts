@@ -46,7 +46,7 @@ export function paintFastFilter(source: HTMLCanvasElement): HTMLCanvasElement {
   return canvas
 }
 
-/** Magic scan: local flat-field paper white; photos stay original. */
+/** Magic scan: local flat-field paper white across the whole page, including photo boxes. */
 export async function renderMagic(
   source: HTMLCanvasElement,
   options?: ScanProcessOptions,

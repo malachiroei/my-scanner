@@ -398,7 +398,7 @@ async function warpCanvas(
 
 const YIELD_MS = 24
 const PAPER_GAMMA = 1.18
-const KEEP_FEATHER_PX = 16
+const KEEP_FEATHER_PX = 24
 const FIELD_COLS = 32
 const FIELD_ROWS = 45
 const FIELD_PERCENTILE = 0.92
@@ -426,7 +426,10 @@ function pointInKeepBox(nx: number, ny: number, boxes: ProtectedBox[]) {
   return false
 }
 
-/** keepOriginalBoxes are 0..1000 on the full uncropped photo; mark dest pixels that map into them. */
+/**
+ * keepOriginalBoxes are 0..1000 on the full uncropped photo; mark dest pixels that map into them.
+ * Used only to keep photographic interiors out of the paper-white field (flattening still runs inside).
+ */
 function destKeepMask(destW: number, destH: number, options?: ScanProcessOptions): Uint8Array {
   const mask = new Uint8Array(destW * destH)
   const boxes = options?.keepOriginalBoxes ?? []
@@ -470,7 +473,7 @@ function destKeepMask(destW: number, destH: number, options?: ScanProcessOptions
   return mask
 }
 
-/** Distance from the protect-box edge, mapped to 0 (outside) … 1 (16px or deeper inside). */
+/** Distance from the protect-box edge, mapped to 0 (outside) … 1 (24px or deeper inside). */
 function keepFeatherAlpha(mask: Uint8Array, width: number, height: number, radius: number): Float32Array {
   const alpha = new Float32Array(width * height)
   const maxd = radius + 2
@@ -624,34 +627,21 @@ async function applyWhitePointLevels(image: ImageData, options?: ScanProcessOpti
   const protect = destKeepMask(width, height, options)
   const alpha = keepFeatherAlpha(protect, width, height, KEEP_FEATHER_PX)
   const field = buildPaperField(data, width, height, alpha)
+  // Flatten the entire page, including keepOriginalBoxes, so padded paper matches #FFFFFF.
   for (let y = 0; y < height; y += 1) {
     if (y % 48 === 0) await yieldBusy(clock)
     const row = y * width
     for (let x = 0; x < width; x += 1) {
       const i = (row + x) * 4
-      const a = alpha[row + x] ?? 0
       const origR = data[i] ?? 0
       const origG = data[i + 1] ?? 0
       const origB = data[i + 2] ?? 0
-      if (a >= 1) {
-        data[i + 3] = 255
-        continue
-      }
       const flatR = flattenChannel(origR, sampleField(field, field.r, x, y, width, height))
       const flatG = flattenChannel(origG, sampleField(field, field.g, x, y, width, height))
       const flatB = flattenChannel(origB, sampleField(field, field.b, x, y, width, height))
-      const outR = gammaChannel(flatR)
-      const outG = gammaChannel(flatG)
-      const outB = gammaChannel(flatB)
-      if (a <= 0) {
-        data[i] = outR
-        data[i + 1] = outG
-        data[i + 2] = outB
-      } else {
-        data[i] = clamp255(outR + (origR - outR) * a)
-        data[i + 1] = clamp255(outG + (origG - outG) * a)
-        data[i + 2] = clamp255(outB + (origB - outB) * a)
-      }
+      data[i] = gammaChannel(flatR)
+      data[i + 1] = gammaChannel(flatG)
+      data[i + 2] = gammaChannel(flatB)
       data[i + 3] = 255
     }
   }
@@ -720,7 +710,7 @@ async function processPixels(
   return canvas
 }
 
-/** Magic Color: local flat-field paper white. Photos in keepOriginalBoxes stay original. */
+/** Magic Color: 32×45 flat-field paper white across the whole page, including photo boxes. */
 export async function applyCanvasMagic(
   source: HTMLCanvasElement,
   options?: ScanProcessOptions,
