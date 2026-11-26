@@ -14,10 +14,10 @@ export type ScanProcessOptions = {
 const A4_SHORT = 2480
 const A4_LONG = 3508
 const WARP_SOURCE = 4600
-/** Outward centroid expansion in 0..1000 units so header/barcode stay in while sides stay tight. */
-const PAPER_PAD_X = 10
-const PAPER_PAD_TOP = 28
-const PAPER_PAD_BOTTOM = 28
+/** Tiny vertical safety only — sides hug the paper so the A4 page fills with the document. */
+const PAPER_PAD_X = 0
+const PAPER_PAD_TOP = 6
+const PAPER_PAD_BOTTOM = 6
 
 function padPaperCorners(corners: Corners, width: number, height: number): Corners {
   const toN = (point: Point): Point => ({
